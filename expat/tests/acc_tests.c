@@ -10,7 +10,7 @@
    Copyright (c) 2003      Greg Stein <gstein@users.sourceforge.net>
    Copyright (c) 2005-2007 Steven Solie <steven@solie.ca>
    Copyright (c) 2005-2012 Karl Waclawek <karl@waclawek.net>
-   Copyright (c) 2016-2022 Sebastian Pipping <sebastian@pipping.org>
+   Copyright (c) 2016-2024 Sebastian Pipping <sebastian@pipping.org>
    Copyright (c) 2017-2022 Rhodri James <rhodri@wildebeest.org.uk>
    Copyright (c) 2017      Joe Orton <jorton@redhat.com>
    Copyright (c) 2017      José Gutiérrez de la Concha <jose@zeroc.com>
@@ -41,6 +41,7 @@
    USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
+#include <math.h> /* NAN, INFINITY */
 #include <stdio.h>
 #include <string.h>
 
@@ -54,52 +55,53 @@
 #include "handlers.h"
 #include "acc_tests.h"
 
-#if defined(XML_DTD)
+#if XML_GE == 1
 START_TEST(test_accounting_precision) {
-  const XML_Bool filled_later = XML_TRUE; /* value is arbitrary */
   struct AccountingTestCase cases[] = {
-      {"<e/>", NULL, NULL, 0, 0},
-      {"<e></e>", NULL, NULL, 0, 0},
+      {"<e/>", NULL, NULL, 0},
+      {"<e></e>", NULL, NULL, 0},
 
       /* Attributes */
-      {"<e k1=\"v2\" k2=\"v2\"/>", NULL, NULL, 0, filled_later},
-      {"<e k1=\"v2\" k2=\"v2\"></e>", NULL, NULL, 0, 0},
-      {"<p:e xmlns:p=\"https://domain.invalid/\" />", NULL, NULL, 0,
-       filled_later},
+      {"<e k1=\"v2\" k2=\"v2\"/>", NULL, NULL, 0},
+      {"<e k1=\"v2\" k2=\"v2\"></e>", NULL, NULL, 0},
+      {"<p:e xmlns:p=\"https://domain.invalid/\" />", NULL, NULL, 0},
       {"<e k=\"&amp;&apos;&gt;&lt;&quot;\" />", NULL, NULL,
-       sizeof(XML_Char) * 5 /* number of predefined entities */, filled_later},
+       sizeof(XML_Char) * 5 /* number of predefined entities */},
       {"<e1 xmlns='https://example.org/'>\n"
        "  <e2 xmlns=''/>\n"
        "</e1>",
-       NULL, NULL, 0, filled_later},
+       NULL, NULL, 0},
 
       /* Text */
-      {"<e>text</e>", NULL, NULL, 0, filled_later},
-      {"<e1><e2>text1<e3/>text2</e2></e1>", NULL, NULL, 0, filled_later},
+      {"<e>text</e>", NULL, NULL, 0},
+      {"<e1><e2>text1<e3/>text2</e2></e1>", NULL, NULL, 0},
       {"<e>&amp;&apos;&gt;&lt;&quot;</e>", NULL, NULL,
-       sizeof(XML_Char) * 5 /* number of predefined entities */, filled_later},
-      {"<e>&#65;&#41;</e>", NULL, NULL, 0, filled_later},
+       sizeof(XML_Char) * 5 /* number of predefined entities */},
+      {"<e>&#65;&#41;</e>", NULL, NULL, 0},
 
       /* Prolog */
-      {"<?xml version=\"1.0\"?><root/>", NULL, NULL, 0, filled_later},
+      {"<?xml version=\"1.0\"?><root/>", NULL, NULL, 0},
 
       /* Whitespace */
-      {"  <e1>  <e2>  </e2>  </e1>  ", NULL, NULL, 0, filled_later},
-      {"<e1  ><e2  /></e1  >", NULL, NULL, 0, filled_later},
-      {"<e1><e2 k = \"v\"/><e3 k = 'v'/></e1>", NULL, NULL, 0, filled_later},
+      {"  <e1>  <e2>  </e2>  </e1>  ", NULL, NULL, 0},
+      {"<e1  ><e2  /></e1  >", NULL, NULL, 0},
+      {"<e1><e2 k = \"v\"/><e3 k = 'v'/></e1>", NULL, NULL, 0},
 
       /* Comments */
-      {"<!-- Comment --><e><!-- Comment --></e>", NULL, NULL, 0, filled_later},
+      {"<!-- Comment --><e><!-- Comment --></e>", NULL, NULL, 0},
 
       /* Processing instructions */
       {"<?xml-stylesheet type=\"text/xsl\" href=\"https://domain.invalid/\" media=\"all\"?><e/>",
-       NULL, NULL, 0, filled_later},
+       NULL, NULL, 0},
+      {"<?pi0?><?pi1 ?><?pi2  ?><r/><?pi4?>", NULL, NULL, 0},
+#  ifdef XML_DTD
       {"<?pi0?><?pi1 ?><?pi2  ?><!DOCTYPE r SYSTEM 'first.ent'><r/>",
        "<?pi3?><!ENTITY % e1 SYSTEM 'second.ent'><?pi4?>%e1;<?pi5?>", "<?pi6?>",
-       0, filled_later},
+       0},
+#  endif /* XML_DTD */
 
       /* CDATA */
-      {"<e><![CDATA[one two three]]></e>", NULL, NULL, 0, filled_later},
+      {"<e><![CDATA[one two three]]></e>", NULL, NULL, 0},
       /* The following is the essence of this OSS-Fuzz finding:
          https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=34302
          https://oss-fuzz.com/testcase-detail/4860575394955264
@@ -108,9 +110,9 @@ START_TEST(test_accounting_precision) {
        "<!ENTITY e \"111<![CDATA[2 <= 2]]>333\">\n"
        "]>\n"
        "<r>&e;</r>\n",
-       NULL, NULL, sizeof(XML_Char) * strlen("111<![CDATA[2 <= 2]]>333"),
-       filled_later},
+       NULL, NULL, sizeof(XML_Char) * strlen("111<![CDATA[2 <= 2]]>333")},
 
+#  ifdef XML_DTD
       /* Conditional sections */
       {"<!DOCTYPE r [\n"
        "<!ENTITY % draft 'INCLUDE'>\n"
@@ -121,20 +123,20 @@ START_TEST(test_accounting_precision) {
        "<r/>\n",
        "<![%draft;[<!--1-->]]>\n"
        "<![%final;[<!--22-->]]>",
-       NULL, sizeof(XML_Char) * (strlen("INCLUDE") + strlen("IGNORE")),
-       filled_later},
+       NULL, sizeof(XML_Char) * (strlen("INCLUDE") + strlen("IGNORE"))},
+#  endif /* XML_DTD */
 
       /* General entities */
       {"<!DOCTYPE root [\n"
        "<!ENTITY nine \"123456789\">\n"
        "]>\n"
        "<root>&nine;</root>",
-       NULL, NULL, sizeof(XML_Char) * strlen("123456789"), filled_later},
+       NULL, NULL, sizeof(XML_Char) * strlen("123456789")},
       {"<!DOCTYPE root [\n"
        "<!ENTITY nine \"123456789\">\n"
        "]>\n"
        "<root k1=\"&nine;\"/>",
-       NULL, NULL, sizeof(XML_Char) * strlen("123456789"), filled_later},
+       NULL, NULL, sizeof(XML_Char) * strlen("123456789")},
       {"<!DOCTYPE root [\n"
        "<!ENTITY nine \"123456789\">\n"
        "<!ENTITY nine2 \"&nine;&nine;\">\n"
@@ -142,21 +144,26 @@ START_TEST(test_accounting_precision) {
        "<root>&nine2;&nine2;&nine2;</root>",
        NULL, NULL,
        sizeof(XML_Char) * 3 /* calls to &nine2; */ * 2 /* calls to &nine; */
-           * (strlen("&nine;") + strlen("123456789")),
-       filled_later},
+           * (strlen("&nine;") + strlen("123456789"))},
       {"<!DOCTYPE r [\n"
        "  <!ENTITY five SYSTEM 'first.ent'>\n"
        "]>\n"
        "<r>&five;</r>",
-       "12345", NULL, 0, filled_later},
+       "12345", NULL, 0},
+      {"<!DOCTYPE r [\n"
+       "  <!ENTITY five SYSTEM 'first.ent'>\n"
+       "]>\n"
+       "<r>&five;</r>",
+       "\xEF\xBB\xBF" /* UTF-8 BOM */, NULL, 0},
 
+#  ifdef XML_DTD
       /* Parameter entities */
       {"<!DOCTYPE r [\n"
        "<!ENTITY % comment \"<!---->\">\n"
        "%comment;\n"
        "]>\n"
        "<r/>",
-       NULL, NULL, sizeof(XML_Char) * strlen("<!---->"), filled_later},
+       NULL, NULL, sizeof(XML_Char) * strlen("<!---->")},
       {"<!DOCTYPE r [\n"
        "<!ENTITY % ninedef \"&#60;!ENTITY nine &#34;123456789&#34;&#62;\">\n"
        "%ninedef;\n"
@@ -164,8 +171,7 @@ START_TEST(test_accounting_precision) {
        "<r>&nine;</r>",
        NULL, NULL,
        sizeof(XML_Char)
-           * (strlen("<!ENTITY nine \"123456789\">") + strlen("123456789")),
-       filled_later},
+           * (strlen("<!ENTITY nine \"123456789\">") + strlen("123456789"))},
       {"<!DOCTYPE r [\n"
        "<!ENTITY % comment \"<!--1-->\">\n"
        "<!ENTITY % comment2 \"&#37;comment;<!--22-->&#37;comment;\">\n"
@@ -174,8 +180,7 @@ START_TEST(test_accounting_precision) {
        "<r/>\n",
        NULL, NULL,
        sizeof(XML_Char)
-           * (strlen("%comment;<!--22-->%comment;") + 2 * strlen("<!--1-->")),
-       filled_later},
+           * (strlen("%comment;<!--22-->%comment;") + 2 * strlen("<!--1-->"))},
       {"<!DOCTYPE r [\n"
        "  <!ENTITY % five \"12345\">\n"
        "  <!ENTITY % five2def \"&#60;!ENTITY five2 &#34;[&#37;five;][&#37;five;]]]]&#34;&#62;\">\n"
@@ -186,8 +191,7 @@ START_TEST(test_accounting_precision) {
        sizeof(XML_Char)
            * (strlen("<!ENTITY five2 \"[%five;][%five;]]]]\">")
               + 2 /* calls to "%five;" */ * strlen("12345")
-              + /* from "&five2;": */ strlen("[12345][12345]]]]")),
-       filled_later},
+              + /* from "&five2;": */ strlen("[12345][12345]]]]"))},
       {"<!DOCTYPE r SYSTEM \"first.ent\">\n"
        "<r/>",
        "<!ENTITY % comment '<!--1-->'>\n"
@@ -196,15 +200,13 @@ START_TEST(test_accounting_precision) {
        NULL,
        sizeof(XML_Char)
            * (strlen("<!--22-->%comment;<!--22-->%comment;<!--22-->")
-              + 2 /* calls to "%comment;" */ * strlen("<!---->")),
-       filled_later},
+              + 2 /* calls to "%comment;" */ * strlen("<!---->"))},
       {"<!DOCTYPE r SYSTEM 'first.ent'>\n"
        "<r/>",
        "<!ENTITY % e1 PUBLIC 'foo' 'second.ent'>\n"
        "<!ENTITY % e2 '<!--22-->%e1;<!--22-->'>\n"
        "%e2;\n",
-       "<!--1-->", sizeof(XML_Char) * strlen("<!--22--><!--1--><!--22-->"),
-       filled_later},
+       "<!--1-->", sizeof(XML_Char) * strlen("<!--22--><!--1--><!--22-->")},
       {
           "<!DOCTYPE r SYSTEM 'first.ent'>\n"
           "<r/>",
@@ -214,7 +216,6 @@ START_TEST(test_accounting_precision) {
           "hello\n"
           "xml" /* without trailing newline! */,
           0,
-          filled_later,
       },
       {
           "<!DOCTYPE r SYSTEM 'first.ent'>\n"
@@ -225,7 +226,6 @@ START_TEST(test_accounting_precision) {
           "hello\n"
           "xml\n" /* with trailing newline! */,
           0,
-          filled_later,
       },
       {"<!DOCTYPE doc SYSTEM 'first.ent'>\n"
        "<doc></doc>\n",
@@ -234,93 +234,69 @@ START_TEST(test_accounting_precision) {
        "<!ENTITY % e2 '%e1;'>\n"
        "%e1;\n",
        "\xEF\xBB\xBF<!ATTLIST doc a1 CDATA 'value'>" /* UTF-8 BOM */,
-       strlen("\xEF\xBB\xBF<!ATTLIST doc a1 CDATA 'value'>"), filled_later},
-      {"<!DOCTYPE r [\n"
-       "  <!ENTITY five SYSTEM 'first.ent'>\n"
-       "]>\n"
-       "<r>&five;</r>",
-       "\xEF\xBB\xBF" /* UTF-8 BOM */, NULL, 0, filled_later},
+       strlen("\xEF\xBB\xBF<!ATTLIST doc a1 CDATA 'value'>")},
+#  endif /* XML_DTD */
   };
 
   const size_t countCases = sizeof(cases) / sizeof(cases[0]);
   size_t u = 0;
   for (; u < countCases; u++) {
-    size_t v = 0;
-    for (; v < 2; v++) {
-      const XML_Bool singleBytesWanted = (v == 0) ? XML_FALSE : XML_TRUE;
-      const unsigned long long expectedCountBytesDirect
-          = strlen(cases[u].primaryText);
-      const unsigned long long expectedCountBytesIndirect
-          = (cases[u].firstExternalText ? strlen(cases[u].firstExternalText)
-                                        : 0)
-            + (cases[u].secondExternalText ? strlen(cases[u].secondExternalText)
-                                           : 0)
-            + cases[u].expectedCountBytesIndirectExtra;
+    const unsigned long long expectedCountBytesDirect
+        = strlen(cases[u].primaryText);
+    const unsigned long long expectedCountBytesIndirect
+        = (cases[u].firstExternalText ? strlen(cases[u].firstExternalText) : 0)
+          + (cases[u].secondExternalText ? strlen(cases[u].secondExternalText)
+                                         : 0)
+          + cases[u].expectedCountBytesIndirectExtra;
 
-      XML_Parser parser = XML_ParserCreate(NULL);
-      XML_SetParamEntityParsing(parser, XML_PARAM_ENTITY_PARSING_ALWAYS);
-      if (cases[u].firstExternalText) {
-        XML_SetExternalEntityRefHandler(parser,
-                                        accounting_external_entity_ref_handler);
-        XML_SetUserData(parser, (void *)&cases[u]);
-        cases[u].singleBytesWanted = singleBytesWanted;
-      }
+    XML_Parser parser = XML_ParserCreate(NULL);
+    XML_SetParamEntityParsing(parser, XML_PARAM_ENTITY_PARSING_ALWAYS);
+    if (cases[u].firstExternalText) {
+      XML_SetExternalEntityRefHandler(parser,
+                                      accounting_external_entity_ref_handler);
+      XML_SetUserData(parser, (void *)&cases[u]);
+    }
 
-      const XmlParseFunction xmlParseFunction
-          = singleBytesWanted ? _XML_Parse_SINGLE_BYTES : XML_Parse;
+    enum XML_Status status
+        = _XML_Parse_SINGLE_BYTES(parser, cases[u].primaryText,
+                                  (int)strlen(cases[u].primaryText), XML_TRUE);
+    if (status != XML_STATUS_OK) {
+      _xml_failure(parser, __FILE__, __LINE__);
+    }
 
-      enum XML_Status status
-          = xmlParseFunction(parser, cases[u].primaryText,
-                             (int)strlen(cases[u].primaryText), XML_TRUE);
-      if (status != XML_STATUS_OK) {
-        _xml_failure(parser, __FILE__, __LINE__);
-      }
+    const unsigned long long actualCountBytesDirect
+        = testingAccountingGetCountBytesDirect(parser);
+    const unsigned long long actualCountBytesIndirect
+        = testingAccountingGetCountBytesIndirect(parser);
 
-      const unsigned long long actualCountBytesDirect
-          = testingAccountingGetCountBytesDirect(parser);
-      const unsigned long long actualCountBytesIndirect
-          = testingAccountingGetCountBytesIndirect(parser);
+    XML_ParserFree(parser);
 
-      XML_ParserFree(parser);
+    if (actualCountBytesDirect != expectedCountBytesDirect) {
+      fprintf(
+          stderr,
+          "Document " EXPAT_FMT_SIZE_T("") " of " EXPAT_FMT_SIZE_T("") ": Expected " EXPAT_FMT_ULL(
+              "") " count direct bytes, got " EXPAT_FMT_ULL("") " instead.\n",
+          u + 1, countCases, expectedCountBytesDirect, actualCountBytesDirect);
+      fail("Count of direct bytes is off");
+    }
 
-      if (actualCountBytesDirect != expectedCountBytesDirect) {
-        fprintf(
-            stderr,
-            "Document " EXPAT_FMT_SIZE_T("") " of " EXPAT_FMT_SIZE_T("") ", %s: Expected " EXPAT_FMT_ULL(
-                "") " count direct bytes, got " EXPAT_FMT_ULL("") " instead.\n",
-            u + 1, countCases, singleBytesWanted ? "single bytes" : "chunks",
-            expectedCountBytesDirect, actualCountBytesDirect);
-        fail("Count of direct bytes is off");
-      }
-
-      if (actualCountBytesIndirect != expectedCountBytesIndirect) {
-        fprintf(
-            stderr,
-            "Document " EXPAT_FMT_SIZE_T("") " of " EXPAT_FMT_SIZE_T("") ", %s: Expected " EXPAT_FMT_ULL(
-                "") " count indirect bytes, got " EXPAT_FMT_ULL("") " instead.\n",
-            u + 1, countCases, singleBytesWanted ? "single bytes" : "chunks",
-            expectedCountBytesIndirect, actualCountBytesIndirect);
-        fail("Count of indirect bytes is off");
-      }
+    if (actualCountBytesIndirect != expectedCountBytesIndirect) {
+      fprintf(
+          stderr,
+          "Document " EXPAT_FMT_SIZE_T("") " of " EXPAT_FMT_SIZE_T("") ": Expected " EXPAT_FMT_ULL(
+              "") " count indirect bytes, got " EXPAT_FMT_ULL("") " instead.\n",
+          u + 1, countCases, expectedCountBytesIndirect,
+          actualCountBytesIndirect);
+      fail("Count of indirect bytes is off");
     }
   }
 }
 END_TEST
 
-static float
-portableNAN(void) {
-  return strtof("nan", NULL);
-}
-
-static float
-portableINFINITY(void) {
-  return strtof("infinity", NULL);
-}
-
 START_TEST(test_billion_laughs_attack_protection_api) {
   XML_Parser parserWithoutParent = XML_ParserCreate(NULL);
-  XML_Parser parserWithParent
-      = XML_ExternalEntityParserCreate(parserWithoutParent, NULL, NULL);
+  XML_Parser parserWithParent = XML_ExternalEntityParserCreate(
+      parserWithoutParent, XCS("entity123"), NULL);
   if (parserWithoutParent == NULL)
     fail("parserWithoutParent is NULL");
   if (parserWithParent == NULL)
@@ -335,7 +311,7 @@ START_TEST(test_billion_laughs_attack_protection_api) {
       == XML_TRUE)
     fail("Call with non-root parser is NOT supposed to succeed");
   if (XML_SetBillionLaughsAttackProtectionMaximumAmplification(
-          parserWithoutParent, portableNAN())
+          parserWithoutParent, NAN)
       == XML_TRUE)
     fail("Call with NaN limit is NOT supposed to succeed");
   if (XML_SetBillionLaughsAttackProtectionMaximumAmplification(
@@ -357,7 +333,7 @@ START_TEST(test_billion_laughs_attack_protection_api) {
       == XML_FALSE)
     fail("Call with positive limit >=1.0 is supposed to succeed");
   if (XML_SetBillionLaughsAttackProtectionMaximumAmplification(
-          parserWithoutParent, portableINFINITY())
+          parserWithoutParent, INFINITY)
       == XML_FALSE)
     fail("Call with positive limit >=1.0 is supposed to succeed");
 
@@ -384,13 +360,16 @@ END_TEST
 START_TEST(test_helper_unsigned_char_to_printable) {
   // Smoke test
   unsigned char uc = 0;
-  for (; uc < (unsigned char)-1; uc++) {
+  for (;; uc++) {
     set_subtest("char %u", (unsigned)uc);
     const char *const printable = unsignedCharToPrintable(uc);
     if (printable == NULL)
       fail("unsignedCharToPrintable returned NULL");
-    if (strlen(printable) < (size_t)1)
+    else if (strlen(printable) < (size_t)1)
       fail("unsignedCharToPrintable returned empty string");
+    if (uc == (unsigned char)-1) {
+      break;
+    }
   }
 
   // Two concrete samples
@@ -402,11 +381,68 @@ START_TEST(test_helper_unsigned_char_to_printable) {
     fail("unsignedCharToPrintable result mistaken");
 }
 END_TEST
-#endif // defined(XML_DTD)
+
+START_TEST(test_amplification_isolated_external_parser) {
+  // NOTE: Length 44 is precisely twice the length of "<!ENTITY a SYSTEM 'b'>"
+  // (22) that is used in function accountingGetCurrentAmplification in
+  // xmlparse.c.
+  //                  1.........1.........1.........1.........1..4 => 44
+  const char doc[] = "<!ENTITY % p1 '123456789_123456789_1234567'>";
+  const int docLen = (int)sizeof(doc) - 1;
+  const float maximumToleratedAmplification = 2.0f;
+
+  struct TestCase {
+    int offsetOfThreshold;
+    enum XML_Status expectedStatus;
+  };
+
+  struct TestCase cases[] = {
+      {-2, XML_STATUS_ERROR}, {-1, XML_STATUS_ERROR}, {0, XML_STATUS_ERROR},
+      {+1, XML_STATUS_OK},    {+2, XML_STATUS_OK},
+  };
+
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    const int offsetOfThreshold = cases[i].offsetOfThreshold;
+    const enum XML_Status expectedStatus = cases[i].expectedStatus;
+    const unsigned long long activationThresholdBytes
+        = docLen + offsetOfThreshold;
+
+    set_subtest("offsetOfThreshold=%d, expectedStatus=%d", offsetOfThreshold,
+                expectedStatus);
+
+    XML_Parser parser = XML_ParserCreate(NULL);
+    assert_true(parser != NULL);
+
+    assert_true(XML_SetBillionLaughsAttackProtectionMaximumAmplification(
+                    parser, maximumToleratedAmplification)
+                == XML_TRUE);
+    assert_true(XML_SetBillionLaughsAttackProtectionActivationThreshold(
+                    parser, activationThresholdBytes)
+                == XML_TRUE);
+
+    XML_Parser ext_parser = XML_ExternalEntityParserCreate(parser, NULL, NULL);
+    assert_true(ext_parser != NULL);
+
+    const enum XML_Status actualStatus
+        = _XML_Parse_SINGLE_BYTES(ext_parser, doc, docLen, XML_TRUE);
+
+    assert_true(actualStatus == expectedStatus);
+    if (actualStatus != XML_STATUS_OK) {
+      assert_true(XML_GetErrorCode(ext_parser)
+                  == XML_ERROR_AMPLIFICATION_LIMIT_BREACH);
+    }
+
+    XML_ParserFree(ext_parser);
+    XML_ParserFree(parser);
+  }
+}
+END_TEST
+
+#endif // XML_GE == 1
 
 void
 make_accounting_test_case(Suite *s) {
-#if defined(XML_DTD)
+#if XML_GE == 1
   TCase *tc_accounting = tcase_create("accounting tests");
 
   suite_add_tcase(s, tc_accounting);
@@ -414,7 +450,9 @@ make_accounting_test_case(Suite *s) {
   tcase_add_test(tc_accounting, test_accounting_precision);
   tcase_add_test(tc_accounting, test_billion_laughs_attack_protection_api);
   tcase_add_test(tc_accounting, test_helper_unsigned_char_to_printable);
+  tcase_add_test__ifdef_xml_dtd(tc_accounting,
+                                test_amplification_isolated_external_parser);
 #else
   UNUSED_P(s);
-#endif /* defined(XML_DTD) */
+#endif /* XML_GE == 1 */
 }

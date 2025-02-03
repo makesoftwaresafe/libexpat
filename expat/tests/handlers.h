@@ -10,7 +10,7 @@
    Copyright (c) 2003      Greg Stein <gstein@users.sourceforge.net>
    Copyright (c) 2005-2007 Steven Solie <steven@solie.ca>
    Copyright (c) 2005-2012 Karl Waclawek <karl@waclawek.net>
-   Copyright (c) 2016-2022 Sebastian Pipping <sebastian@pipping.org>
+   Copyright (c) 2016-2024 Sebastian Pipping <sebastian@pipping.org>
    Copyright (c) 2017-2022 Rhodri James <rhodri@wildebeest.org.uk>
    Copyright (c) 2017      Joe Orton <jorton@redhat.com>
    Copyright (c) 2017      José Gutiérrez de la Concha <jose@zeroc.com>
@@ -91,6 +91,11 @@ typedef struct elementInfo {
   const XML_Char *id_name;
   AttrInfo *attributes;
 } ElementInfo;
+
+typedef struct StructParserAndElementInfo {
+  XML_Parser parser;
+  ElementInfo *info;
+} ParserAndElementInfo;
 
 extern void XMLCALL counting_start_element_handler(void *userData,
                                                    const XML_Char *name,
@@ -185,6 +190,9 @@ extern int XMLCALL external_entity_faulter(XML_Parser parser,
                                            const XML_Char *base,
                                            const XML_Char *systemId,
                                            const XML_Char *publicId);
+extern int XMLCALL external_entity_failer__if_not_xml_ge(
+    XML_Parser parser, const XML_Char *context, const XML_Char *base,
+    const XML_Char *systemId, const XML_Char *publicId);
 extern int XMLCALL external_entity_null_loader(XML_Parser parser,
                                                const XML_Char *context,
                                                const XML_Char *base,
@@ -325,14 +333,11 @@ extern int XMLCALL external_entity_oneshot_loader(XML_Parser parser,
                                                   const XML_Char *systemId,
                                                   const XML_Char *publicId);
 
-enum ee_parse_flags { EE_PARSE_NONE = 0x00, EE_PARSE_FULL_BUFFER = 0x01 };
-
 typedef struct ExtTest2 {
   const char *parse_text;
   int parse_len;
   const XML_Char *encoding;
   CharData *storage;
-  enum ee_parse_flags flags;
 } ExtTest2;
 
 extern int XMLCALL external_entity_loader2(XML_Parser parser,
@@ -407,15 +412,11 @@ extern int XMLCALL external_entity_parser_create_alloc_fail_handler(
     XML_Parser parser, const XML_Char *context, const XML_Char *base,
     const XML_Char *systemId, const XML_Char *publicId);
 
-#  if defined(XML_DTD)
-typedef enum XML_Status (*XmlParseFunction)(XML_Parser, const char *, int, int);
-
 struct AccountingTestCase {
   const char *primaryText;
   const char *firstExternalText;  /* often NULL */
   const char *secondExternalText; /* often NULL */
   const unsigned long long expectedCountBytesIndirectExtra;
-  XML_Bool singleBytesWanted;
 };
 
 extern int accounting_external_entity_ref_handler(XML_Parser parser,
@@ -423,7 +424,6 @@ extern int accounting_external_entity_ref_handler(XML_Parser parser,
                                                   const XML_Char *base,
                                                   const XML_Char *systemId,
                                                   const XML_Char *publicId);
-#  endif /* defined(XML_DTD) */
 
 /* NotStandalone handlers */
 
@@ -504,8 +504,8 @@ extern void XMLCALL record_element_end_handler(void *userData,
                                                const XML_Char *name);
 
 extern const struct handler_record_entry *
-_handler_record_get(const struct handler_record_list *storage, const int index,
-                    const char *file, const int line);
+_handler_record_get(const struct handler_record_list *storage, int index,
+                    const char *file, int line);
 
 #  define handler_record_get(storage, index)                                   \
     _handler_record_get((storage), (index), __FILE__, __LINE__)
@@ -515,8 +515,8 @@ _handler_record_get(const struct handler_record_list *storage, const int index,
     do {                                                                       \
       const struct handler_record_entry *e                                     \
           = handler_record_get(storage, index);                                \
-      fail_unless(strcmp(e->name, expected_name) == 0);                        \
-      fail_unless(e->arg == (expected_arg));                                   \
+      assert_true(strcmp(e->name, expected_name) == 0);                        \
+      assert_true(e->arg == (expected_arg));                                   \
     } while (0)
 
 /* Entity Declaration Handlers */
@@ -557,6 +557,10 @@ extern void XMLCALL suspending_comment_handler(void *userData,
 extern void XMLCALL element_decl_suspender(void *userData, const XML_Char *name,
                                            XML_Content *model);
 
+extern void XMLCALL suspend_after_element_declaration(void *userData,
+                                                      const XML_Char *name,
+                                                      XML_Content *model);
+
 extern void XMLCALL accumulate_pi_characters(void *userData,
                                              const XML_Char *target,
                                              const XML_Char *data);
@@ -568,6 +572,19 @@ extern void XMLCALL accumulate_entity_decl(
     const XML_Char *value, int value_length, const XML_Char *base,
     const XML_Char *systemId, const XML_Char *publicId,
     const XML_Char *notationName);
+
+extern void XMLCALL accumulate_start_element(void *userData,
+                                             const XML_Char *name,
+                                             const XML_Char **atts);
+
+extern void XMLCALL accumulate_characters(void *userData, const XML_Char *s,
+                                          int len);
+
+extern void XMLCALL accumulate_attribute(void *userData, const XML_Char *name,
+                                         const XML_Char **atts);
+
+extern void XMLCALL ext_accumulate_characters(void *userData, const XML_Char *s,
+                                              int len);
 
 typedef struct default_check {
   const XML_Char *expected;

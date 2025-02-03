@@ -6,7 +6,7 @@
 #                      \___/_/\_\ .__/ \__,_|\__|
 #                               |_| XML parser
 #
-# Copyright (c) 2019-2021 Sebastian Pipping <sebastian@pipping.org>
+# Copyright (c) 2019-2023 Sebastian Pipping <sebastian@pipping.org>
 # Copyright (c) 2021      Tim Bray <tbray@textuality.com>
 # Licensed under the MIT license:
 #
@@ -33,11 +33,11 @@ import argparse
 
 epilog = """
 exit status:
-  0             the input files are well-formed and the output (if requested) was written successfully
-  1             could not allocate data structures, signals a serious problem with execution environment
-  2             one or more input files were not well-formed
-  3             could not create an output file
-  4             command-line argument error
+  0              the input files are well-formed and the output (if requested) was written successfully
+  1              could not allocate data structures, signals a serious problem with execution environment
+  2              one or more input files were not well-formed
+  3              could not create an output file
+  4              command-line argument error
 
 xmlwf of libexpat is software libre, licensed under the MIT license.
 Please report bugs at https://github.com/libexpat/libexpat/issues -- thank you!
@@ -45,8 +45,8 @@ Please report bugs at https://github.com/libexpat/libexpat/issues -- thank you!
 
 usage = """
   %(prog)s [OPTIONS] [FILE ...]
-  %(prog)s -h
-  %(prog)s -v
+  %(prog)s -h|--help
+  %(prog)s -v|--version
 """
 
 parser = argparse.ArgumentParser(prog='xmlwf', add_help=False,
@@ -82,12 +82,16 @@ billion_laughs.add_argument('-a', metavar='FACTOR',
                             help='set maximum tolerated [a]mplification factor (default: 100.0)')
 billion_laughs.add_argument('-b', metavar='BYTES', help='set number of output [b]ytes needed to activate (default: 8 MiB)')
 
+reparse_deferral = parser.add_argument_group('reparse deferral')
+reparse_deferral.add_argument('-q', metavar='FACTOR',
+                            help='disable reparse deferral, and allow [q]uadratic parse runtime with large tokens')
+
 parser.add_argument('files', metavar='FILE', nargs='*', help='file to process (default: STDIN)')
 
 info = parser.add_argument_group('info arguments')
 info = info.add_mutually_exclusive_group()
-info.add_argument('-h', action='store_true', help='show this [h]elp message and exit')
-info.add_argument('-v', action='store_true', help='show program\'s [v]ersion number and exit')
+info.add_argument('-h', '--help', action='store_true', help='show this [h]elp message and exit')
+info.add_argument('-v', '--version', action='store_true', help='show program\'s [v]ersion number and exit')
 
 
 if __name__ == '__main__':

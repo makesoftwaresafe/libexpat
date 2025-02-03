@@ -10,7 +10,7 @@
    Copyright (c) 2003      Greg Stein <gstein@users.sourceforge.net>
    Copyright (c) 2005-2007 Steven Solie <steven@solie.ca>
    Copyright (c) 2005-2012 Karl Waclawek <karl@waclawek.net>
-   Copyright (c) 2016-2022 Sebastian Pipping <sebastian@pipping.org>
+   Copyright (c) 2016-2024 Sebastian Pipping <sebastian@pipping.org>
    Copyright (c) 2017-2022 Rhodri James <rhodri@wildebeest.org.uk>
    Copyright (c) 2017      Joe Orton <jorton@redhat.com>
    Copyright (c) 2017      José Gutiérrez de la Concha <jose@zeroc.com>
@@ -18,7 +18,7 @@
    Copyright (c) 2019      David Loffredo <loffredo@steptools.com>
    Copyright (c) 2020      Tim Gates <tim.gates@iress.com>
    Copyright (c) 2021      Donghee Na <donghee.na@python.org>
-   Copyright (c) 2023      Sony Corporation / Snild Dolkow <snild@sony.com>
+   Copyright (c) 2023-2024 Sony Corporation / Snild Dolkow <snild@sony.com>
    Licensed under the MIT license:
 
    Permission is  hereby granted,  free of charge,  to any  person obtaining
@@ -49,6 +49,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #if ! defined(__cplusplus)
 #  include <stdbool.h>
@@ -159,11 +160,17 @@ START_TEST(test_bom_utf16_le) {
 }
 END_TEST
 
-/* Parse whole buffer at once to exercise a different code path */
 START_TEST(test_nobom_utf16_le) {
   char text[] = " \0<\0e\0/\0>\0";
 
-  if (XML_Parse(g_parser, text, sizeof(text) - 1, XML_TRUE) == XML_STATUS_ERROR)
+  if (g_chunkSize == 1) {
+    // TODO: with just the first byte, we can't tell the difference between
+    // UTF-16-LE and UTF-8. Avoid the failure for now.
+    return;
+  }
+
+  if (_XML_Parse_SINGLE_BYTES(g_parser, text, sizeof(text) - 1, XML_TRUE)
+      == XML_STATUS_ERROR)
     xml_failure(g_parser);
 }
 END_TEST
@@ -1184,6 +1191,22 @@ START_TEST(test_not_standalone_handler_accept) {
 }
 END_TEST
 
+START_TEST(test_entity_start_tag_level_greater_than_one) {
+  const char *const text = "<!DOCTYPE t1 [\n"
+                           "  <!ENTITY e1 'hello'>\n"
+                           "]>\n"
+                           "<t1>\n"
+                           "  <t2>&e1;</t2>\n"
+                           "</t1>\n";
+
+  XML_Parser parser = XML_ParserCreate(NULL);
+  assert_true(_XML_Parse_SINGLE_BYTES(parser, text, (int)strlen(text),
+                                      /*isFinal*/ XML_TRUE)
+              == XML_STATUS_OK);
+  XML_ParserFree(parser);
+}
+END_TEST
+
 START_TEST(test_wfc_no_recursive_entity_refs) {
   const char *text = "<!DOCTYPE doc [\n"
                      "  <!ENTITY entity '&#38;entity;'>\n"
@@ -1192,6 +1215,122 @@ START_TEST(test_wfc_no_recursive_entity_refs) {
 
   expect_failure(text, XML_ERROR_RECURSIVE_ENTITY_REF,
                  "Parser did not report recursive entity reference.");
+}
+END_TEST
+
+START_TEST(test_no_indirectly_recursive_entity_refs) {
+  struct TestCase {
+    const char *doc;
+    bool usesParameterEntities;
+  };
+
+  const struct TestCase cases[] = {
+      // general entity + character data
+      {"<!DOCTYPE a [\n"
+       "  <!ENTITY e1 '&e2;'>\n"
+       "  <!ENTITY e2 '&e1;'>\n"
+       "]><a>&e2;</a>\n",
+       false},
+
+      // general entity + attribute value
+      {"<!DOCTYPE a [\n"
+       "  <!ENTITY e1 '&e2;'>\n"
+       "  <!ENTITY e2 '&e1;'>\n"
+       "]><a k1='&e2;' />\n",
+       false},
+
+      // parameter entity
+      {"<!DOCTYPE doc [\n"
+       "  <!ENTITY % p1 '&#37;p2;'>\n"
+       "  <!ENTITY % p2 '&#37;p1;'>\n"
+       "  <!ENTITY % define_g \"<!ENTITY g '&#37;p2;'>\">\n"
+       "  %define_g;\n"
+       "]>\n"
+       "<doc/>\n",
+       true},
+  };
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    const char *const doc = cases[i].doc;
+    const bool usesParameterEntities = cases[i].usesParameterEntities;
+
+    set_subtest("[%i] %s", (int)i, doc);
+
+#ifdef XML_DTD // both GE and DTD
+    const bool rejection_expected = true;
+#elif XML_GE == 1 // GE but not DTD
+    const bool rejection_expected = ! usesParameterEntities;
+#else             // neither DTD nor GE
+    const bool rejection_expected = false;
+#endif
+
+    XML_Parser parser = XML_ParserCreate(NULL);
+
+#ifdef XML_DTD
+    if (usesParameterEntities) {
+      assert_true(
+          XML_SetParamEntityParsing(parser, XML_PARAM_ENTITY_PARSING_ALWAYS)
+          == 1);
+    }
+#else
+    UNUSED_P(usesParameterEntities);
+#endif // XML_DTD
+
+    const enum XML_Status status
+        = _XML_Parse_SINGLE_BYTES(parser, doc, (int)strlen(doc),
+                                  /*isFinal*/ XML_TRUE);
+
+    if (rejection_expected) {
+      assert_true(status == XML_STATUS_ERROR);
+      assert_true(XML_GetErrorCode(parser) == XML_ERROR_RECURSIVE_ENTITY_REF);
+    } else {
+      assert_true(status == XML_STATUS_OK);
+    }
+
+    XML_ParserFree(parser);
+  }
+}
+END_TEST
+
+START_TEST(test_recursive_external_parameter_entity_2) {
+  struct TestCase {
+    const char *doc;
+    enum XML_Status expectedStatus;
+  };
+
+  struct TestCase cases[] = {
+      {"<!ENTITY % p1 '%p1;'>", XML_STATUS_ERROR},
+      {"<!ENTITY % p1 '%p1;'>"
+       "<!ENTITY % p1 'first declaration wins'>",
+       XML_STATUS_ERROR},
+      {"<!ENTITY % p1 'first declaration wins'>"
+       "<!ENTITY % p1 '%p1;'>",
+       XML_STATUS_OK},
+      {"<!ENTITY % p1 '&#37;p1;'>", XML_STATUS_OK},
+  };
+
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    const char *const doc = cases[i].doc;
+    const enum XML_Status expectedStatus = cases[i].expectedStatus;
+    set_subtest("%s", doc);
+
+    XML_Parser parser = XML_ParserCreate(NULL);
+    assert_true(parser != NULL);
+
+    XML_Parser ext_parser = XML_ExternalEntityParserCreate(parser, NULL, NULL);
+    assert_true(ext_parser != NULL);
+
+    const enum XML_Status actualStatus
+        = _XML_Parse_SINGLE_BYTES(ext_parser, doc, (int)strlen(doc), XML_TRUE);
+
+    assert_true(actualStatus == expectedStatus);
+    if (actualStatus != XML_STATUS_OK) {
+      assert_true(XML_GetErrorCode(ext_parser)
+                  == XML_ERROR_RECURSIVE_ENTITY_REF);
+    }
+
+    XML_ParserFree(ext_parser);
+    XML_ParserFree(parser);
+  }
 }
 END_TEST
 
@@ -1367,13 +1506,15 @@ START_TEST(test_suspend_parser_between_char_data_calls) {
 
   XML_SetCharacterDataHandler(g_parser, clearing_aborting_character_handler);
   g_resumable = XML_TRUE;
-  if (_XML_Parse_SINGLE_BYTES(g_parser, text, (int)strlen(text), XML_TRUE)
+  // can't use SINGLE_BYTES here, because it'll return early on suspension, and
+  // we won't know exactly how much input we actually managed to give Expat.
+  if (XML_Parse(g_parser, text, (int)strlen(text), XML_TRUE)
       != XML_STATUS_SUSPENDED)
     xml_failure(g_parser);
   if (XML_GetErrorCode(g_parser) != XML_ERROR_NONE)
     xml_failure(g_parser);
   /* Try parsing directly */
-  if (XML_Parse(g_parser, text, (int)strlen(text), XML_TRUE)
+  if (_XML_Parse_SINGLE_BYTES(g_parser, text, (int)strlen(text), XML_TRUE)
       != XML_STATUS_ERROR)
     fail("Attempt to continue parse while suspended not faulted");
   if (XML_GetErrorCode(g_parser) != XML_ERROR_SUSPENDED)
@@ -1396,7 +1537,9 @@ START_TEST(test_repeated_stop_parser_between_char_data_calls) {
   XML_SetCharacterDataHandler(g_parser, parser_stop_character_handler);
   g_resumable = XML_TRUE;
   g_abortable = XML_FALSE;
-  if (_XML_Parse_SINGLE_BYTES(g_parser, text, (int)strlen(text), XML_TRUE)
+  // can't use SINGLE_BYTES here, because it'll return early on suspension, and
+  // we won't know exactly how much input we actually managed to give Expat.
+  if (XML_Parse(g_parser, text, (int)strlen(text), XML_TRUE)
       != XML_STATUS_SUSPENDED)
     fail("Failed to double-suspend parser");
 
@@ -1780,12 +1923,19 @@ END_TEST
 
 /* Test suspending the parser in cdata handler */
 START_TEST(test_suspend_parser_between_cdata_calls) {
+  if (g_chunkSize != 0) {
+    // this test does not use SINGLE_BYTES, because of suspension
+    return;
+  }
+
   const char *text = long_cdata_text;
   enum XML_Status result;
 
   XML_SetCharacterDataHandler(g_parser, clearing_aborting_character_handler);
   g_resumable = XML_TRUE;
-  result = _XML_Parse_SINGLE_BYTES(g_parser, text, (int)strlen(text), XML_TRUE);
+  // can't use SINGLE_BYTES here, because it'll return early on suspension, and
+  // we won't know exactly how much input we actually managed to give Expat.
+  result = XML_Parse(g_parser, text, (int)strlen(text), XML_TRUE);
   if (result != XML_STATUS_SUSPENDED) {
     if (result == XML_STATUS_ERROR)
       xml_failure(g_parser);
@@ -1855,16 +2005,16 @@ START_TEST(test_default_current) {
     while (cdata_len_remaining > 0) {
       const struct handler_record_entry *c_entry
           = handler_record_get(&storage, i++);
-      fail_unless(strcmp(c_entry->name, "record_cdata_handler") == 0);
-      fail_unless(c_entry->arg > 0);
-      fail_unless(c_entry->arg <= cdata_len_remaining);
+      assert_true(strcmp(c_entry->name, "record_cdata_handler") == 0);
+      assert_true(c_entry->arg > 0);
+      assert_true(c_entry->arg <= cdata_len_remaining);
       cdata_len_remaining -= c_entry->arg;
       // default handler must follow, with the exact same len argument.
       assert_record_handler_called(&storage, i++, "record_default_handler",
                                    c_entry->arg);
     }
     assert_record_handler_called(&storage, i++, "record_default_handler", 6);
-    fail_unless(storage.count == i);
+    assert_true(storage.count == i);
   }
 
   /* Again, without the defaulting */
@@ -1886,13 +2036,13 @@ START_TEST(test_default_current) {
     while (cdata_len_remaining > 0) {
       const struct handler_record_entry *c_entry
           = handler_record_get(&storage, i++);
-      fail_unless(strcmp(c_entry->name, "record_cdata_nodefault_handler") == 0);
-      fail_unless(c_entry->arg > 0);
-      fail_unless(c_entry->arg <= cdata_len_remaining);
+      assert_true(strcmp(c_entry->name, "record_cdata_nodefault_handler") == 0);
+      assert_true(c_entry->arg > 0);
+      assert_true(c_entry->arg <= cdata_len_remaining);
       cdata_len_remaining -= c_entry->arg;
     }
     assert_record_handler_called(&storage, i++, "record_default_handler", 6);
-    fail_unless(storage.count == i);
+    assert_true(storage.count == i);
   }
 
   /* Now with an internal entity to complicate matters */
@@ -1928,7 +2078,7 @@ START_TEST(test_default_current) {
     assert_record_handler_called(&storage, 16, "record_default_handler", 5);
     assert_record_handler_called(&storage, 17, "record_default_handler", 8);
     assert_record_handler_called(&storage, 18, "record_default_handler", 6);
-    fail_unless(storage.count == 19);
+    assert_true(storage.count == 19);
   }
 
   /* Again, with a skip handler */
@@ -1965,7 +2115,7 @@ START_TEST(test_default_current) {
     assert_record_handler_called(&storage, 16, "record_default_handler", 5);
     assert_record_handler_called(&storage, 17, "record_skip_handler", 0);
     assert_record_handler_called(&storage, 18, "record_default_handler", 6);
-    fail_unless(storage.count == 19);
+    assert_true(storage.count == 19);
   }
 
   /* This time, allow the entity through */
@@ -2001,7 +2151,7 @@ START_TEST(test_default_current) {
     assert_record_handler_called(&storage, 17, "record_cdata_handler", 1);
     assert_record_handler_called(&storage, 18, "record_default_handler", 1);
     assert_record_handler_called(&storage, 19, "record_default_handler", 6);
-    fail_unless(storage.count == 20);
+    assert_true(storage.count == 20);
   }
 
   /* Finally, without passing the cdata to the default handler */
@@ -2037,7 +2187,7 @@ START_TEST(test_default_current) {
     assert_record_handler_called(&storage, 17, "record_cdata_nodefault_handler",
                                  1);
     assert_record_handler_called(&storage, 18, "record_default_handler", 6);
-    fail_unless(storage.count == 19);
+    assert_true(storage.count == 19);
   }
 }
 END_TEST
@@ -2074,41 +2224,44 @@ element_decl_check_model(void *userData, const XML_Char *name,
   errorFlags |= ((xcstrcmp(name, XCS("junk")) == 0) ? 0 : (1u << 0));
   errorFlags |= ((model != NULL) ? 0 : (1u << 1));
 
-  errorFlags |= ((model[0].type == XML_CTYPE_SEQ) ? 0 : (1u << 2));
-  errorFlags |= ((model[0].quant == XML_CQUANT_NONE) ? 0 : (1u << 3));
-  errorFlags |= ((model[0].numchildren == 2) ? 0 : (1u << 4));
-  errorFlags |= ((model[0].children == &model[1]) ? 0 : (1u << 5));
-  errorFlags |= ((model[0].name == NULL) ? 0 : (1u << 6));
+  if (model != NULL) {
+    errorFlags |= ((model[0].type == XML_CTYPE_SEQ) ? 0 : (1u << 2));
+    errorFlags |= ((model[0].quant == XML_CQUANT_NONE) ? 0 : (1u << 3));
+    errorFlags |= ((model[0].numchildren == 2) ? 0 : (1u << 4));
+    errorFlags |= ((model[0].children == &model[1]) ? 0 : (1u << 5));
+    errorFlags |= ((model[0].name == NULL) ? 0 : (1u << 6));
 
-  errorFlags |= ((model[1].type == XML_CTYPE_CHOICE) ? 0 : (1u << 7));
-  errorFlags |= ((model[1].quant == XML_CQUANT_NONE) ? 0 : (1u << 8));
-  errorFlags |= ((model[1].numchildren == 3) ? 0 : (1u << 9));
-  errorFlags |= ((model[1].children == &model[3]) ? 0 : (1u << 10));
-  errorFlags |= ((model[1].name == NULL) ? 0 : (1u << 11));
+    errorFlags |= ((model[1].type == XML_CTYPE_CHOICE) ? 0 : (1u << 7));
+    errorFlags |= ((model[1].quant == XML_CQUANT_NONE) ? 0 : (1u << 8));
+    errorFlags |= ((model[1].numchildren == 3) ? 0 : (1u << 9));
+    errorFlags |= ((model[1].children == &model[3]) ? 0 : (1u << 10));
+    errorFlags |= ((model[1].name == NULL) ? 0 : (1u << 11));
 
-  errorFlags |= ((model[2].type == XML_CTYPE_NAME) ? 0 : (1u << 12));
-  errorFlags |= ((model[2].quant == XML_CQUANT_REP) ? 0 : (1u << 13));
-  errorFlags |= ((model[2].numchildren == 0) ? 0 : (1u << 14));
-  errorFlags |= ((model[2].children == NULL) ? 0 : (1u << 15));
-  errorFlags |= ((xcstrcmp(model[2].name, XCS("zebra")) == 0) ? 0 : (1u << 16));
+    errorFlags |= ((model[2].type == XML_CTYPE_NAME) ? 0 : (1u << 12));
+    errorFlags |= ((model[2].quant == XML_CQUANT_REP) ? 0 : (1u << 13));
+    errorFlags |= ((model[2].numchildren == 0) ? 0 : (1u << 14));
+    errorFlags |= ((model[2].children == NULL) ? 0 : (1u << 15));
+    errorFlags
+        |= ((xcstrcmp(model[2].name, XCS("zebra")) == 0) ? 0 : (1u << 16));
 
-  errorFlags |= ((model[3].type == XML_CTYPE_NAME) ? 0 : (1u << 17));
-  errorFlags |= ((model[3].quant == XML_CQUANT_NONE) ? 0 : (1u << 18));
-  errorFlags |= ((model[3].numchildren == 0) ? 0 : (1u << 19));
-  errorFlags |= ((model[3].children == NULL) ? 0 : (1u << 20));
-  errorFlags |= ((xcstrcmp(model[3].name, XCS("bar")) == 0) ? 0 : (1u << 21));
+    errorFlags |= ((model[3].type == XML_CTYPE_NAME) ? 0 : (1u << 17));
+    errorFlags |= ((model[3].quant == XML_CQUANT_NONE) ? 0 : (1u << 18));
+    errorFlags |= ((model[3].numchildren == 0) ? 0 : (1u << 19));
+    errorFlags |= ((model[3].children == NULL) ? 0 : (1u << 20));
+    errorFlags |= ((xcstrcmp(model[3].name, XCS("bar")) == 0) ? 0 : (1u << 21));
 
-  errorFlags |= ((model[4].type == XML_CTYPE_NAME) ? 0 : (1u << 22));
-  errorFlags |= ((model[4].quant == XML_CQUANT_NONE) ? 0 : (1u << 23));
-  errorFlags |= ((model[4].numchildren == 0) ? 0 : (1u << 24));
-  errorFlags |= ((model[4].children == NULL) ? 0 : (1u << 25));
-  errorFlags |= ((xcstrcmp(model[4].name, XCS("foo")) == 0) ? 0 : (1u << 26));
+    errorFlags |= ((model[4].type == XML_CTYPE_NAME) ? 0 : (1u << 22));
+    errorFlags |= ((model[4].quant == XML_CQUANT_NONE) ? 0 : (1u << 23));
+    errorFlags |= ((model[4].numchildren == 0) ? 0 : (1u << 24));
+    errorFlags |= ((model[4].children == NULL) ? 0 : (1u << 25));
+    errorFlags |= ((xcstrcmp(model[4].name, XCS("foo")) == 0) ? 0 : (1u << 26));
 
-  errorFlags |= ((model[5].type == XML_CTYPE_NAME) ? 0 : (1u << 27));
-  errorFlags |= ((model[5].quant == XML_CQUANT_PLUS) ? 0 : (1u << 28));
-  errorFlags |= ((model[5].numchildren == 0) ? 0 : (1u << 29));
-  errorFlags |= ((model[5].children == NULL) ? 0 : (1u << 30));
-  errorFlags |= ((xcstrcmp(model[5].name, XCS("xyz")) == 0) ? 0 : (1u << 31));
+    errorFlags |= ((model[5].type == XML_CTYPE_NAME) ? 0 : (1u << 27));
+    errorFlags |= ((model[5].quant == XML_CQUANT_PLUS) ? 0 : (1u << 28));
+    errorFlags |= ((model[5].numchildren == 0) ? 0 : (1u << 29));
+    errorFlags |= ((model[5].children == NULL) ? 0 : (1u << 30));
+    errorFlags |= ((xcstrcmp(model[5].name, XCS("xyz")) == 0) ? 0 : (1u << 31));
+  }
 
   XML_SetUserData(g_parser, (void *)(uintptr_t)errorFlags);
   XML_FreeContentModel(g_parser, model);
@@ -2124,7 +2277,7 @@ START_TEST(test_dtd_elements_nesting) {
   XML_SetUserData(g_parser, (void *)(uintptr_t)-1);
 
   XML_SetElementDeclHandler(g_parser, element_decl_check_model);
-  if (XML_Parse(g_parser, text, (int)strlen(text), XML_TRUE)
+  if (_XML_Parse_SINGLE_BYTES(g_parser, text, (int)strlen(text), XML_TRUE)
       == XML_STATUS_ERROR)
     xml_failure(g_parser);
 
@@ -2304,11 +2457,20 @@ START_TEST(test_attributes) {
   info[0].attributes = doc_info;
   info[1].attributes = tag_info;
 
-  XML_SetStartElementHandler(g_parser, counting_start_element_handler);
-  XML_SetUserData(g_parser, info);
-  if (_XML_Parse_SINGLE_BYTES(g_parser, text, (int)strlen(text), XML_TRUE)
+  XML_Parser parser = XML_ParserCreate(NULL);
+  assert_true(parser != NULL);
+  ParserAndElementInfo parserAndElementInfos = {
+      parser,
+      info,
+  };
+
+  XML_SetStartElementHandler(parser, counting_start_element_handler);
+  XML_SetUserData(parser, &parserAndElementInfos);
+  if (_XML_Parse_SINGLE_BYTES(parser, text, (int)strlen(text), XML_TRUE)
       == XML_STATUS_ERROR)
-    xml_failure(g_parser);
+    xml_failure(parser);
+
+  XML_ParserFree(parser);
 }
 END_TEST
 
@@ -2316,6 +2478,11 @@ END_TEST
  * entity.  Exercises some obscure code in XML_ParserReset().
  */
 START_TEST(test_reset_in_entity) {
+  if (g_chunkSize != 0) {
+    // this test does not use SINGLE_BYTES, because of suspension
+    return;
+  }
+
   const char *text = "<!DOCTYPE doc [\n"
                      "<!ENTITY wombat 'wom'>\n"
                      "<!ENTITY entity 'hi &wom; there'>\n"
@@ -2325,7 +2492,9 @@ START_TEST(test_reset_in_entity) {
 
   g_resumable = XML_TRUE;
   XML_SetCharacterDataHandler(g_parser, clearing_aborting_character_handler);
-  if (_XML_Parse_SINGLE_BYTES(g_parser, text, (int)strlen(text), XML_TRUE)
+  // can't use SINGLE_BYTES here, because it'll return early on suspension, and
+  // we won't know exactly how much input we actually managed to give Expat.
+  if (XML_Parse(g_parser, text, (int)strlen(text), XML_TRUE)
       == XML_STATUS_ERROR)
     xml_failure(g_parser);
   XML_GetParsingStatus(g_parser, &status);
@@ -2751,6 +2920,61 @@ START_TEST(test_empty_parse) {
 }
 END_TEST
 
+/* Test XML_Parse for len < 0 */
+START_TEST(test_negative_len_parse) {
+  const char *const doc = "<root/>";
+  for (int isFinal = 0; isFinal < 2; isFinal++) {
+    set_subtest("isFinal=%d", isFinal);
+
+    XML_Parser parser = XML_ParserCreate(NULL);
+
+    if (XML_GetErrorCode(parser) != XML_ERROR_NONE)
+      fail("There was not supposed to be any initial parse error.");
+
+    const enum XML_Status status = XML_Parse(parser, doc, -1, isFinal);
+
+    if (status != XML_STATUS_ERROR)
+      fail("Negative len was expected to fail the parse but did not.");
+
+    if (XML_GetErrorCode(parser) != XML_ERROR_INVALID_ARGUMENT)
+      fail("Parse error does not match XML_ERROR_INVALID_ARGUMENT.");
+
+    XML_ParserFree(parser);
+  }
+}
+END_TEST
+
+/* Test XML_ParseBuffer for len < 0 */
+START_TEST(test_negative_len_parse_buffer) {
+  const char *const doc = "<root/>";
+  for (int isFinal = 0; isFinal < 2; isFinal++) {
+    set_subtest("isFinal=%d", isFinal);
+
+    XML_Parser parser = XML_ParserCreate(NULL);
+
+    if (XML_GetErrorCode(parser) != XML_ERROR_NONE)
+      fail("There was not supposed to be any initial parse error.");
+
+    void *const buffer = XML_GetBuffer(parser, (int)strlen(doc));
+
+    if (buffer == NULL)
+      fail("XML_GetBuffer failed.");
+
+    memcpy(buffer, doc, strlen(doc));
+
+    const enum XML_Status status = XML_ParseBuffer(parser, -1, isFinal);
+
+    if (status != XML_STATUS_ERROR)
+      fail("Negative len was expected to fail the parse but did not.");
+
+    if (XML_GetErrorCode(parser) != XML_ERROR_INVALID_ARGUMENT)
+      fail("Parse error does not match XML_ERROR_INVALID_ARGUMENT.");
+
+    XML_ParserFree(parser);
+  }
+}
+END_TEST
+
 /* Test odd corners of the XML_GetBuffer interface */
 static enum XML_Status
 get_feature(enum XML_FeatureEnum feature_id, long *presult) {
@@ -2796,7 +3020,7 @@ START_TEST(test_get_buffer_1) {
    * between INT_MAX and INT_MAX/2.  A gap of 1K seems comfortable,
    * with an extra byte just to ensure that the request is off any
    * boundary.  The request will be inflated internally by
-   * XML_CONTEXT_BYTES (if defined), so we subtract that from our
+   * XML_CONTEXT_BYTES (if >=1), so we subtract that from our
    * request.
    */
   if (get_feature(XML_FEATURE_CONTEXT_BYTES, &context_bytes) != XML_STATUS_OK)
@@ -2832,7 +3056,7 @@ START_TEST(test_get_buffer_2) {
 END_TEST
 
 /* Test for signed integer overflow CVE-2022-23852 */
-#if defined(XML_CONTEXT_BYTES)
+#if XML_CONTEXT_BYTES > 0
 START_TEST(test_get_buffer_3_overflow) {
   XML_Parser parser = XML_ParserCreate(NULL);
   assert(parser != NULL);
@@ -2842,7 +3066,8 @@ START_TEST(test_get_buffer_3_overflow) {
 
   // After this call, variable "keep" in XML_GetBuffer will
   // have value expectedKeepValue
-  if (XML_Parse(parser, text, (int)strlen(text), XML_FALSE /* isFinal */)
+  if (_XML_Parse_SINGLE_BYTES(parser, text, (int)strlen(text),
+                              XML_FALSE /* isFinal */)
       == XML_STATUS_ERROR)
     xml_failure(parser);
 
@@ -2853,7 +3078,66 @@ START_TEST(test_get_buffer_3_overflow) {
   XML_ParserFree(parser);
 }
 END_TEST
-#endif // defined(XML_CONTEXT_BYTES)
+#endif // XML_CONTEXT_BYTES > 0
+
+START_TEST(test_buffer_can_grow_to_max) {
+  const char *const prefixes[] = {
+      "",
+      "<",
+      "<x a='",
+      "<doc><x a='",
+      "<document><x a='",
+      "<averylongelementnamesuchthatitwillhopefullystretchacrossmultiplelinesand"
+      "lookprettyridiculousitsalsoveryhardtoreadandifyouredoingitihavetowonderif"
+      "youreallydonthaveanythingbettertodoofcourseiguessicouldveputsomethingbadin"
+      "herebutipromisethatididntheybtwhowgreatarespacesandpunctuationforhelping"
+      "withreadabilityprettygreatithinkanywaysthisisprobablylongenoughbye><x a='"};
+  const int num_prefixes = sizeof(prefixes) / sizeof(prefixes[0]);
+  int maxbuf = INT_MAX / 2 + (INT_MAX & 1); // round up without overflow
+#if defined(__MINGW32__) && ! defined(__MINGW64__)
+  // workaround for mingw/wine32 on GitHub CI not being able to reach 1GiB
+  // Can we make a big allocation?
+  void *big = malloc(maxbuf);
+  if (! big) {
+    // The big allocation failed. Let's be a little lenient.
+    maxbuf = maxbuf / 2;
+  }
+  free(big);
+#endif
+
+  for (int i = 0; i < num_prefixes; ++i) {
+    set_subtest("\"%s\"", prefixes[i]);
+    XML_Parser parser = XML_ParserCreate(NULL);
+    const int prefix_len = (int)strlen(prefixes[i]);
+    const enum XML_Status s
+        = _XML_Parse_SINGLE_BYTES(parser, prefixes[i], prefix_len, XML_FALSE);
+    if (s != XML_STATUS_OK)
+      xml_failure(parser);
+
+    // XML_CONTEXT_BYTES of the prefix may remain in the buffer;
+    // subtracting the whole prefix is easiest, and close enough.
+    assert_true(XML_GetBuffer(parser, maxbuf - prefix_len) != NULL);
+    // The limit should be consistent; no prefix should allow us to
+    // reach above the max buffer size.
+    assert_true(XML_GetBuffer(parser, maxbuf + 1) == NULL);
+    XML_ParserFree(parser);
+  }
+}
+END_TEST
+
+START_TEST(test_getbuffer_allocates_on_zero_len) {
+  for (int first_len = 1; first_len >= 0; first_len--) {
+    set_subtest("with len=%d first", first_len);
+    XML_Parser parser = XML_ParserCreate(NULL);
+    assert_true(parser != NULL);
+    assert_true(XML_GetBuffer(parser, first_len) != NULL);
+    assert_true(XML_GetBuffer(parser, 0) != NULL);
+    if (XML_ParseBuffer(parser, 0, XML_FALSE) != XML_STATUS_OK)
+      xml_failure(parser);
+    XML_ParserFree(parser);
+  }
+}
+END_TEST
 
 /* Test position information macros */
 START_TEST(test_byte_info_at_end) {
@@ -3093,7 +3377,7 @@ static int XMLCALL
 external_bom_checker(XML_Parser parser, const XML_Char *context,
                      const XML_Char *base, const XML_Char *systemId,
                      const XML_Char *publicId) {
-  const char *text = "";
+  const char *text;
   UNUSED_P(base);
   UNUSED_P(systemId);
   UNUSED_P(publicId);
@@ -3109,7 +3393,8 @@ external_bom_checker(XML_Parser parser, const XML_Char *context,
     const int split = testdata->split;
     testdata->nested_callback_happened = XML_TRUE;
 
-    if (XML_Parse(ext_parser, external, split, XML_FALSE) != XML_STATUS_OK) {
+    if (_XML_Parse_SINGLE_BYTES(ext_parser, external, split, XML_FALSE)
+        != XML_STATUS_OK) {
       xml_failure(ext_parser);
     }
     text = external + split; // the parse below will continue where we left off.
@@ -3121,7 +3406,8 @@ external_bom_checker(XML_Parser parser, const XML_Char *context,
     fail("unknown systemId");
   }
 
-  if (XML_Parse(ext_parser, text, (int)strlen(text), XML_TRUE) != XML_STATUS_OK)
+  if (_XML_Parse_SINGLE_BYTES(ext_parser, text, (int)strlen(text), XML_TRUE)
+      != XML_STATUS_OK)
     xml_failure(ext_parser);
 
   XML_ParserFree(ext_parser);
@@ -3455,13 +3741,15 @@ START_TEST(test_suspend_xdecl) {
   XML_SetXmlDeclHandler(g_parser, entity_suspending_xdecl_handler);
   XML_SetUserData(g_parser, g_parser);
   g_resumable = XML_TRUE;
-  if (_XML_Parse_SINGLE_BYTES(g_parser, text, (int)strlen(text), XML_TRUE)
+  // can't use SINGLE_BYTES here, because it'll return early on suspension, and
+  // we won't know exactly how much input we actually managed to give Expat.
+  if (XML_Parse(g_parser, text, (int)strlen(text), XML_TRUE)
       != XML_STATUS_SUSPENDED)
     xml_failure(g_parser);
   if (XML_GetErrorCode(g_parser) != XML_ERROR_NONE)
     xml_failure(g_parser);
   /* Attempt to start a new parse while suspended */
-  if (XML_Parse(g_parser, text, (int)strlen(text), XML_TRUE)
+  if (_XML_Parse_SINGLE_BYTES(g_parser, text, (int)strlen(text), XML_TRUE)
       != XML_STATUS_ERROR)
     fail("Attempt to parse while suspended not faulted");
   if (XML_GetErrorCode(g_parser) != XML_ERROR_SUSPENDED)
@@ -3568,6 +3856,8 @@ START_TEST(test_suspend_resume_internal_entity) {
   XML_SetStartElementHandler(g_parser, start_element_suspender);
   XML_SetCharacterDataHandler(g_parser, accumulate_characters);
   XML_SetUserData(g_parser, &storage);
+  // can't use SINGLE_BYTES here, because it'll return early on suspension, and
+  // we won't know exactly how much input we actually managed to give Expat.
   if (XML_Parse(g_parser, text, (int)strlen(text), XML_TRUE)
       != XML_STATUS_SUSPENDED)
     xml_failure(g_parser);
@@ -3638,8 +3928,9 @@ START_TEST(test_suspend_resume_internal_entity_issue_629) {
     xml_failure(parser);
   if (XML_ResumeParser(parser) != XML_STATUS_OK)
     xml_failure(parser);
-  if (XML_Parse(parser, text + firstChunkSizeBytes,
-                (int)(strlen(text) - firstChunkSizeBytes), XML_TRUE)
+  if (_XML_Parse_SINGLE_BYTES(parser, text + firstChunkSizeBytes,
+                              (int)(strlen(text) - firstChunkSizeBytes),
+                              XML_TRUE)
       != XML_STATUS_OK)
     xml_failure(parser);
   XML_ParserFree(parser);
@@ -3648,12 +3939,19 @@ END_TEST
 
 /* Test syntax error is caught at parse resumption */
 START_TEST(test_resume_entity_with_syntax_error) {
+  if (g_chunkSize != 0) {
+    // this test does not use SINGLE_BYTES, because of suspension
+    return;
+  }
+
   const char *text = "<!DOCTYPE doc [\n"
                      "<!ENTITY foo '<suspend>Hi</wombat>'>\n"
                      "]>\n"
                      "<doc>&foo;</doc>\n";
 
   XML_SetStartElementHandler(g_parser, start_element_suspender);
+  // can't use SINGLE_BYTES here, because it'll return early on suspension, and
+  // we won't know exactly how much input we actually managed to give Expat.
   if (XML_Parse(g_parser, text, (int)strlen(text), XML_TRUE)
       != XML_STATUS_SUSPENDED)
     xml_failure(g_parser);
@@ -3693,7 +3991,7 @@ END_TEST
 START_TEST(test_restart_on_error) {
   const char *text = "<$doc><doc></doc>";
 
-  if (XML_Parse(g_parser, text, (int)strlen(text), XML_TRUE)
+  if (_XML_Parse_SINGLE_BYTES(g_parser, text, (int)strlen(text), XML_TRUE)
       != XML_STATUS_ERROR)
     fail("Invalid tag name not faulted");
   if (XML_GetErrorCode(g_parser) != XML_ERROR_INVALID_TOKEN)
@@ -4267,7 +4565,7 @@ START_TEST(test_ext_entity_latin1_utf16le_bom) {
          /* If Latin-1, 0xff = Y-diaeresis, 0xfe = lowercase thorn,
           *   0x4c = L and 0x20 is a space
           */
-         "\xff\xfe\x4c\x20", 4, XCS("iso-8859-1"), NULL, EE_PARSE_NONE};
+         "\xff\xfe\x4c\x20", 4, XCS("iso-8859-1"), NULL};
 #ifdef XML_UNICODE
   const XML_Char *expected = XCS("\x00ff\x00feL ");
 #else
@@ -4298,7 +4596,7 @@ START_TEST(test_ext_entity_latin1_utf16be_bom) {
          /* If Latin-1, 0xff = Y-diaeresis, 0xfe = lowercase thorn,
           *   0x4c = L and 0x20 is a space
           */
-         "\xfe\xff\x20\x4c", 4, XCS("iso-8859-1"), NULL, EE_PARSE_NONE};
+         "\xfe\xff\x20\x4c", 4, XCS("iso-8859-1"), NULL};
 #ifdef XML_UNICODE
   const XML_Char *expected = XCS("\x00fe\x00ff L");
 #else
@@ -4333,7 +4631,7 @@ START_TEST(test_ext_entity_latin1_utf16le_bom2) {
          /* If Latin-1, 0xff = Y-diaeresis, 0xfe = lowercase thorn,
           *   0x4c = L and 0x20 is a space
           */
-         "\xff\xfe\x4c\x20", 4, XCS("iso-8859-1"), NULL, EE_PARSE_FULL_BUFFER};
+         "\xff\xfe\x4c\x20", 4, XCS("iso-8859-1"), NULL};
 #ifdef XML_UNICODE
   const XML_Char *expected = XCS("\x00ff\x00feL ");
 #else
@@ -4347,7 +4645,7 @@ START_TEST(test_ext_entity_latin1_utf16le_bom2) {
   XML_SetExternalEntityRefHandler(g_parser, external_entity_loader2);
   XML_SetUserData(g_parser, &test_data);
   XML_SetCharacterDataHandler(g_parser, ext2_accumulate_characters);
-  if (XML_Parse(g_parser, text, (int)strlen(text), XML_TRUE)
+  if (_XML_Parse_SINGLE_BYTES(g_parser, text, (int)strlen(text), XML_TRUE)
       == XML_STATUS_ERROR)
     xml_failure(g_parser);
   CharData_CheckXMLChars(&storage, expected);
@@ -4364,7 +4662,7 @@ START_TEST(test_ext_entity_latin1_utf16be_bom2) {
          /* If Latin-1, 0xff = Y-diaeresis, 0xfe = lowercase thorn,
           *   0x4c = L and 0x20 is a space
           */
-         "\xfe\xff\x20\x4c", 4, XCS("iso-8859-1"), NULL, EE_PARSE_FULL_BUFFER};
+         "\xfe\xff\x20\x4c", 4, XCS("iso-8859-1"), NULL};
 #ifdef XML_UNICODE
   const XML_Char *expected = XCS("\x00fe\x00ff L");
 #else
@@ -4378,7 +4676,7 @@ START_TEST(test_ext_entity_latin1_utf16be_bom2) {
   XML_SetExternalEntityRefHandler(g_parser, external_entity_loader2);
   XML_SetUserData(g_parser, &test_data);
   XML_SetCharacterDataHandler(g_parser, ext2_accumulate_characters);
-  if (XML_Parse(g_parser, text, (int)strlen(text), XML_TRUE)
+  if (_XML_Parse_SINGLE_BYTES(g_parser, text, (int)strlen(text), XML_TRUE)
       == XML_STATUS_ERROR)
     xml_failure(g_parser);
   CharData_CheckXMLChars(&storage, expected);
@@ -4391,8 +4689,7 @@ START_TEST(test_ext_entity_utf16_be) {
                      "  <!ENTITY en SYSTEM 'http://example.org/dummy.ent'>\n"
                      "]>\n"
                      "<doc>&en;</doc>";
-  ExtTest2 test_data
-      = {"<\0e\0/\0>\0", 8, XCS("utf-16be"), NULL, EE_PARSE_NONE};
+  ExtTest2 test_data = {"<\0e\0/\0>\0", 8, XCS("utf-16be"), NULL};
 #ifdef XML_UNICODE
   const XML_Char *expected = XCS("\x3c00\x6500\x2f00\x3e00");
 #else
@@ -4421,8 +4718,7 @@ START_TEST(test_ext_entity_utf16_le) {
                      "  <!ENTITY en SYSTEM 'http://example.org/dummy.ent'>\n"
                      "]>\n"
                      "<doc>&en;</doc>";
-  ExtTest2 test_data
-      = {"\0<\0e\0/\0>", 8, XCS("utf-16le"), NULL, EE_PARSE_NONE};
+  ExtTest2 test_data = {"\0<\0e\0/\0>", 8, XCS("utf-16le"), NULL};
 #ifdef XML_UNICODE
   const XML_Char *expected = XCS("\x3c00\x6500\x2f00\x3e00");
 #else
@@ -4476,7 +4772,7 @@ START_TEST(test_ext_entity_utf8_non_bom) {
                      "<doc>&en;</doc>";
   ExtTest2 test_data
       = {"\xef\xbb\x80", /* Arabic letter DAD medial form, U+FEC0 */
-         3, NULL, NULL, EE_PARSE_NONE};
+         3, NULL, NULL};
 #ifdef XML_UNICODE
   const XML_Char *expected = XCS("\xfec0");
 #else
@@ -4582,6 +4878,12 @@ START_TEST(test_utf8_in_start_tags) {
   char doc[1024];
   size_t failCount = 0;
 
+  // we need all the bytes to be parsed, but we don't want the errors that can
+  // trigger on isFinal=XML_TRUE, so we skip the test if the heuristic is on.
+  if (g_reparseDeferralEnabledDefault) {
+    return;
+  }
+
   for (; i < sizeof(cases) / sizeof(cases[0]); i++) {
     size_t j = 0;
     for (; j < sizeof(atNameStart) / sizeof(atNameStart[0]); j++) {
@@ -4591,8 +4893,8 @@ START_TEST(test_utf8_in_start_tags) {
                cases[i].tagName);
       XML_Parser parser = XML_ParserCreate(NULL);
 
-      const enum XML_Status status
-          = XML_Parse(parser, doc, (int)strlen(doc), /*isFinal=*/XML_FALSE);
+      const enum XML_Status status = _XML_Parse_SINGLE_BYTES(
+          parser, doc, (int)strlen(doc), /*isFinal=*/XML_FALSE);
 
       bool success = true;
       if ((status == XML_STATUS_OK) != expectedSuccess) {
@@ -4900,9 +5202,9 @@ START_TEST(test_entity_public_utf16_be) {
       "\0]\0>\0\n"
       /* <d>&j;</d> */
       "\0<\0d\0>\0&\0j\0;\0<\0/\0d\0>";
-  ExtTest2 test_data = {/* <!ENTITY j 'baz'> */
-                        "\0<\0!\0E\0N\0T\0I\0T\0Y\0 \0j\0 \0'\0b\0a\0z\0'\0>",
-                        34, NULL, NULL, EE_PARSE_NONE};
+  ExtTest2 test_data
+      = {/* <!ENTITY j 'baz'> */
+         "\0<\0!\0E\0N\0T\0I\0T\0Y\0 \0j\0 \0'\0b\0a\0z\0'\0>", 34, NULL, NULL};
   const XML_Char *expected = XCS("baz");
   CharData storage;
 
@@ -4932,9 +5234,9 @@ START_TEST(test_entity_public_utf16_le) {
       "]\0>\0\n\0"
       /* <d>&j;</d> */
       "<\0d\0>\0&\0j\0;\0<\0/\0d\0>\0";
-  ExtTest2 test_data = {/* <!ENTITY j 'baz'> */
-                        "<\0!\0E\0N\0T\0I\0T\0Y\0 \0j\0 \0'\0b\0a\0z\0'\0>\0",
-                        34, NULL, NULL, EE_PARSE_NONE};
+  ExtTest2 test_data
+      = {/* <!ENTITY j 'baz'> */
+         "<\0!\0E\0N\0T\0I\0T\0Y\0 \0j\0 \0'\0b\0a\0z\0'\0>\0", 34, NULL, NULL};
   const XML_Char *expected = XCS("baz");
   CharData storage;
 
@@ -5122,6 +5424,602 @@ START_TEST(test_nested_entity_suspend) {
 }
 END_TEST
 
+/* Regression test for quadratic parsing on large tokens */
+START_TEST(test_big_tokens_scale_linearly) {
+  const struct {
+    const char *pre;
+    const char *post;
+  } text[] = {
+      {"<a>", "</a>"},                      // assumed good, used as baseline
+      {"<b><![CDATA[ value: ", " ]]></b>"}, // CDATA, performed OK before patch
+      {"<c attr='", "'></c>"},              // big attribute, used to be O(N²)
+      {"<d><!-- ", " --></d>"},             // long comment, used to be O(N²)
+      {"<e><", "/></e>"},                   // big elem name, used to be O(N²)
+  };
+  const int num_cases = sizeof(text) / sizeof(text[0]);
+  char aaaaaa[4096];
+  const int fillsize = (int)sizeof(aaaaaa);
+  const int fillcount = 100;
+  const unsigned approx_bytes = fillsize * fillcount; // ignore pre/post.
+  const unsigned max_factor = 4;
+  const unsigned max_scanned = max_factor * approx_bytes;
+
+  memset(aaaaaa, 'a', fillsize);
+
+  if (! g_reparseDeferralEnabledDefault) {
+    return; // heuristic is disabled; we would get O(n^2) and fail.
+  }
+
+  for (int i = 0; i < num_cases; ++i) {
+    XML_Parser parser = XML_ParserCreate(NULL);
+    assert_true(parser != NULL);
+    enum XML_Status status;
+    set_subtest("text=\"%saaaaaa%s\"", text[i].pre, text[i].post);
+
+    // parse the start text
+    g_bytesScanned = 0;
+    status = _XML_Parse_SINGLE_BYTES(parser, text[i].pre,
+                                     (int)strlen(text[i].pre), XML_FALSE);
+    if (status != XML_STATUS_OK) {
+      xml_failure(parser);
+    }
+
+    // parse lots of 'a', failing the test early if it takes too long
+    unsigned past_max_count = 0;
+    for (int f = 0; f < fillcount; ++f) {
+      status = _XML_Parse_SINGLE_BYTES(parser, aaaaaa, fillsize, XML_FALSE);
+      if (status != XML_STATUS_OK) {
+        xml_failure(parser);
+      }
+      if (g_bytesScanned > max_scanned) {
+        // We're not done, and have already passed the limit -- the test will
+        // definitely fail. This block allows us to save time by failing early.
+        const unsigned pushed
+            = (unsigned)strlen(text[i].pre) + (f + 1) * fillsize;
+        fprintf(
+            stderr,
+            "after %d/%d loops: pushed=%u scanned=%u (factor ~%.2f) max_scanned: %u (factor ~%u)\n",
+            f + 1, fillcount, pushed, g_bytesScanned,
+            g_bytesScanned / (double)pushed, max_scanned, max_factor);
+        past_max_count++;
+        // We are failing, but allow a few log prints first. If we don't reach
+        // a count of five, the test will fail after the loop instead.
+        assert_true(past_max_count < 5);
+      }
+    }
+
+    // parse the end text
+    status = _XML_Parse_SINGLE_BYTES(parser, text[i].post,
+                                     (int)strlen(text[i].post), XML_TRUE);
+    if (status != XML_STATUS_OK) {
+      xml_failure(parser);
+    }
+
+    assert_true(g_bytesScanned > approx_bytes); // or the counter isn't working
+    if (g_bytesScanned > max_scanned) {
+      fprintf(
+          stderr,
+          "after all input: scanned=%u (factor ~%.2f) max_scanned: %u (factor ~%u)\n",
+          g_bytesScanned, g_bytesScanned / (double)approx_bytes, max_scanned,
+          max_factor);
+      fail("scanned too many bytes");
+    }
+
+    XML_ParserFree(parser);
+  }
+}
+END_TEST
+
+START_TEST(test_set_reparse_deferral) {
+  const char *const pre = "<d>";
+  const char *const start = "<x attr='";
+  const char *const end = "'></x>";
+  char eeeeee[100];
+  const int fillsize = (int)sizeof(eeeeee);
+  memset(eeeeee, 'e', fillsize);
+
+  for (int enabled = 0; enabled <= 1; enabled += 1) {
+    set_subtest("deferral=%d", enabled);
+
+    XML_Parser parser = XML_ParserCreate(NULL);
+    assert_true(parser != NULL);
+    assert_true(XML_SetReparseDeferralEnabled(parser, enabled));
+    // pre-grow the buffer to avoid reparsing due to almost-fullness
+    assert_true(XML_GetBuffer(parser, fillsize * 10103) != NULL);
+
+    CharData storage;
+    CharData_Init(&storage);
+    XML_SetUserData(parser, &storage);
+    XML_SetStartElementHandler(parser, start_element_event_handler);
+
+    enum XML_Status status;
+    // parse the start text
+    status = XML_Parse(parser, pre, (int)strlen(pre), XML_FALSE);
+    if (status != XML_STATUS_OK) {
+      xml_failure(parser);
+    }
+    CharData_CheckXMLChars(&storage, XCS("d")); // first element should be done
+
+    // ..and the start of the token
+    status = XML_Parse(parser, start, (int)strlen(start), XML_FALSE);
+    if (status != XML_STATUS_OK) {
+      xml_failure(parser);
+    }
+    CharData_CheckXMLChars(&storage, XCS("d")); // still just the first one
+
+    // try to parse lots of 'e', but the token isn't finished
+    for (int c = 0; c < 100; ++c) {
+      status = XML_Parse(parser, eeeeee, fillsize, XML_FALSE);
+      if (status != XML_STATUS_OK) {
+        xml_failure(parser);
+      }
+    }
+    CharData_CheckXMLChars(&storage, XCS("d")); // *still* just the first one
+
+    // end the <x> token.
+    status = XML_Parse(parser, end, (int)strlen(end), XML_FALSE);
+    if (status != XML_STATUS_OK) {
+      xml_failure(parser);
+    }
+
+    if (enabled) {
+      // In general, we may need to push more data to trigger a reparse attempt,
+      // but in this test, the data is constructed to always require it.
+      CharData_CheckXMLChars(&storage, XCS("d")); // or the test is incorrect
+      // 2x the token length should suffice; the +1 covers the start and end.
+      for (int c = 0; c < 101; ++c) {
+        status = XML_Parse(parser, eeeeee, fillsize, XML_FALSE);
+        if (status != XML_STATUS_OK) {
+          xml_failure(parser);
+        }
+      }
+    }
+    CharData_CheckXMLChars(&storage, XCS("dx")); // the <x> should be done
+
+    XML_ParserFree(parser);
+  }
+}
+END_TEST
+
+struct element_decl_data {
+  XML_Parser parser;
+  int count;
+};
+
+static void
+element_decl_counter(void *userData, const XML_Char *name, XML_Content *model) {
+  UNUSED_P(name);
+  struct element_decl_data *testdata = (struct element_decl_data *)userData;
+  testdata->count += 1;
+  XML_FreeContentModel(testdata->parser, model);
+}
+
+static int
+external_inherited_parser(XML_Parser p, const XML_Char *context,
+                          const XML_Char *base, const XML_Char *systemId,
+                          const XML_Char *publicId) {
+  UNUSED_P(base);
+  UNUSED_P(systemId);
+  UNUSED_P(publicId);
+  const char *const pre = "<!ELEMENT document ANY>\n";
+  const char *const start = "<!ELEMENT ";
+  const char *const end = " ANY>\n";
+  const char *const post = "<!ELEMENT xyz ANY>\n";
+  const int enabled = *(int *)XML_GetUserData(p);
+  char eeeeee[100];
+  char spaces[100];
+  const int fillsize = (int)sizeof(eeeeee);
+  assert_true(fillsize == (int)sizeof(spaces));
+  memset(eeeeee, 'e', fillsize);
+  memset(spaces, ' ', fillsize);
+
+  XML_Parser parser = XML_ExternalEntityParserCreate(p, context, NULL);
+  assert_true(parser != NULL);
+  // pre-grow the buffer to avoid reparsing due to almost-fullness
+  assert_true(XML_GetBuffer(parser, fillsize * 10103) != NULL);
+
+  struct element_decl_data testdata;
+  testdata.parser = parser;
+  testdata.count = 0;
+  XML_SetUserData(parser, &testdata);
+  XML_SetElementDeclHandler(parser, element_decl_counter);
+
+  enum XML_Status status;
+  // parse the initial text
+  status = XML_Parse(parser, pre, (int)strlen(pre), XML_FALSE);
+  if (status != XML_STATUS_OK) {
+    xml_failure(parser);
+  }
+  assert_true(testdata.count == 1); // first element should be done
+
+  // ..and the start of the big token
+  status = XML_Parse(parser, start, (int)strlen(start), XML_FALSE);
+  if (status != XML_STATUS_OK) {
+    xml_failure(parser);
+  }
+  assert_true(testdata.count == 1); // still just the first one
+
+  // try to parse lots of 'e', but the token isn't finished
+  for (int c = 0; c < 100; ++c) {
+    status = XML_Parse(parser, eeeeee, fillsize, XML_FALSE);
+    if (status != XML_STATUS_OK) {
+      xml_failure(parser);
+    }
+  }
+  assert_true(testdata.count == 1); // *still* just the first one
+
+  // end the big token.
+  status = XML_Parse(parser, end, (int)strlen(end), XML_FALSE);
+  if (status != XML_STATUS_OK) {
+    xml_failure(parser);
+  }
+
+  if (enabled) {
+    // In general, we may need to push more data to trigger a reparse attempt,
+    // but in this test, the data is constructed to always require it.
+    assert_true(testdata.count == 1); // or the test is incorrect
+    // 2x the token length should suffice; the +1 covers the start and end.
+    for (int c = 0; c < 101; ++c) {
+      status = XML_Parse(parser, spaces, fillsize, XML_FALSE);
+      if (status != XML_STATUS_OK) {
+        xml_failure(parser);
+      }
+    }
+  }
+  assert_true(testdata.count == 2); // the big token should be done
+
+  // parse the final text
+  status = XML_Parse(parser, post, (int)strlen(post), XML_TRUE);
+  if (status != XML_STATUS_OK) {
+    xml_failure(parser);
+  }
+  assert_true(testdata.count == 3); // after isFinal=XML_TRUE, all must be done
+
+  XML_ParserFree(parser);
+  return XML_STATUS_OK;
+}
+
+START_TEST(test_reparse_deferral_is_inherited) {
+  const char *const text
+      = "<!DOCTYPE document SYSTEM 'something.ext'><document/>";
+  for (int enabled = 0; enabled <= 1; ++enabled) {
+    set_subtest("deferral=%d", enabled);
+
+    XML_Parser parser = XML_ParserCreate(NULL);
+    assert_true(parser != NULL);
+    XML_SetUserData(parser, (void *)&enabled);
+    XML_SetParamEntityParsing(parser, XML_PARAM_ENTITY_PARSING_ALWAYS);
+    // this handler creates a sub-parser and checks that its deferral behavior
+    // is what we expected, based on the value of `enabled` (in userdata).
+    XML_SetExternalEntityRefHandler(parser, external_inherited_parser);
+    assert_true(XML_SetReparseDeferralEnabled(parser, enabled));
+    if (XML_Parse(parser, text, (int)strlen(text), XML_TRUE) != XML_STATUS_OK)
+      xml_failure(parser);
+
+    XML_ParserFree(parser);
+  }
+}
+END_TEST
+
+START_TEST(test_set_reparse_deferral_on_null_parser) {
+  assert_true(XML_SetReparseDeferralEnabled(NULL, 0) == XML_FALSE);
+  assert_true(XML_SetReparseDeferralEnabled(NULL, 1) == XML_FALSE);
+  assert_true(XML_SetReparseDeferralEnabled(NULL, 10) == XML_FALSE);
+  assert_true(XML_SetReparseDeferralEnabled(NULL, 100) == XML_FALSE);
+  assert_true(XML_SetReparseDeferralEnabled(NULL, (XML_Bool)INT_MIN)
+              == XML_FALSE);
+  assert_true(XML_SetReparseDeferralEnabled(NULL, (XML_Bool)INT_MAX)
+              == XML_FALSE);
+}
+END_TEST
+
+START_TEST(test_set_reparse_deferral_on_the_fly) {
+  const char *const pre = "<d><x attr='";
+  const char *const end = "'></x>";
+  char iiiiii[100];
+  const int fillsize = (int)sizeof(iiiiii);
+  memset(iiiiii, 'i', fillsize);
+
+  XML_Parser parser = XML_ParserCreate(NULL);
+  assert_true(parser != NULL);
+  assert_true(XML_SetReparseDeferralEnabled(parser, XML_TRUE));
+
+  CharData storage;
+  CharData_Init(&storage);
+  XML_SetUserData(parser, &storage);
+  XML_SetStartElementHandler(parser, start_element_event_handler);
+
+  enum XML_Status status;
+  // parse the start text
+  status = XML_Parse(parser, pre, (int)strlen(pre), XML_FALSE);
+  if (status != XML_STATUS_OK) {
+    xml_failure(parser);
+  }
+  CharData_CheckXMLChars(&storage, XCS("d")); // first element should be done
+
+  // try to parse some 'i', but the token isn't finished
+  status = XML_Parse(parser, iiiiii, fillsize, XML_FALSE);
+  if (status != XML_STATUS_OK) {
+    xml_failure(parser);
+  }
+  CharData_CheckXMLChars(&storage, XCS("d")); // *still* just the first one
+
+  // end the <x> token.
+  status = XML_Parse(parser, end, (int)strlen(end), XML_FALSE);
+  if (status != XML_STATUS_OK) {
+    xml_failure(parser);
+  }
+  CharData_CheckXMLChars(&storage, XCS("d")); // not yet.
+
+  // now change the heuristic setting and add *no* data
+  assert_true(XML_SetReparseDeferralEnabled(parser, XML_FALSE));
+  // we avoid isFinal=XML_TRUE, because that would force-bypass the heuristic.
+  status = XML_Parse(parser, "", 0, XML_FALSE);
+  if (status != XML_STATUS_OK) {
+    xml_failure(parser);
+  }
+  CharData_CheckXMLChars(&storage, XCS("dx"));
+
+  XML_ParserFree(parser);
+}
+END_TEST
+
+START_TEST(test_set_bad_reparse_option) {
+  XML_Parser parser = XML_ParserCreate(NULL);
+  assert_true(XML_FALSE == XML_SetReparseDeferralEnabled(parser, 2));
+  assert_true(XML_FALSE == XML_SetReparseDeferralEnabled(parser, 3));
+  assert_true(XML_FALSE == XML_SetReparseDeferralEnabled(parser, 99));
+  assert_true(XML_FALSE == XML_SetReparseDeferralEnabled(parser, 127));
+  assert_true(XML_FALSE == XML_SetReparseDeferralEnabled(parser, 128));
+  assert_true(XML_FALSE == XML_SetReparseDeferralEnabled(parser, 129));
+  assert_true(XML_FALSE == XML_SetReparseDeferralEnabled(parser, 255));
+  assert_true(XML_TRUE == XML_SetReparseDeferralEnabled(parser, 0));
+  assert_true(XML_TRUE == XML_SetReparseDeferralEnabled(parser, 1));
+  XML_ParserFree(parser);
+}
+END_TEST
+
+static size_t g_totalAlloc = 0;
+static size_t g_biggestAlloc = 0;
+
+static void *
+counting_realloc(void *ptr, size_t size) {
+  g_totalAlloc += size;
+  if (size > g_biggestAlloc) {
+    g_biggestAlloc = size;
+  }
+  return realloc(ptr, size);
+}
+
+static void *
+counting_malloc(size_t size) {
+  return counting_realloc(NULL, size);
+}
+
+START_TEST(test_bypass_heuristic_when_close_to_bufsize) {
+  if (g_chunkSize != 0) {
+    // this test does not use SINGLE_BYTES, because it depends on very precise
+    // buffer fills.
+    return;
+  }
+  if (! g_reparseDeferralEnabledDefault) {
+    return; // this test is irrelevant when the deferral heuristic is disabled.
+  }
+
+  const int document_length = 65536;
+  char *const document = (char *)malloc(document_length);
+
+  const XML_Memory_Handling_Suite memfuncs = {
+      counting_malloc,
+      counting_realloc,
+      free,
+  };
+
+  const int leading_list[] = {0, 3, 61, 96, 400, 401, 4000, 4010, 4099, -1};
+  const int bigtoken_list[] = {3000, 4000, 4001, 4096, 4099, 5000, 20000, -1};
+  const int fillsize_list[] = {131, 256, 399, 400, 401, 1025, 4099, 4321, -1};
+
+  for (const int *leading = leading_list; *leading >= 0; leading++) {
+    for (const int *bigtoken = bigtoken_list; *bigtoken >= 0; bigtoken++) {
+      for (const int *fillsize = fillsize_list; *fillsize >= 0; fillsize++) {
+        set_subtest("leading=%d bigtoken=%d fillsize=%d", *leading, *bigtoken,
+                    *fillsize);
+        // start by checking that the test looks reasonably valid
+        assert_true(*leading + *bigtoken <= document_length);
+
+        // put 'x' everywhere; some will be overwritten by elements.
+        memset(document, 'x', document_length);
+        // maybe add an initial tag
+        if (*leading) {
+          assert_true(*leading >= 3); // or the test case is invalid
+          memcpy(document, "<a>", 3);
+        }
+        // add the large token
+        document[*leading + 0] = '<';
+        document[*leading + 1] = 'b';
+        memset(&document[*leading + 2], ' ', *bigtoken - 2); // a spacy token
+        document[*leading + *bigtoken - 1] = '>';
+
+        // 1 for 'b', plus 1 or 0 depending on the presence of 'a'
+        const int expected_elem_total = 1 + (*leading ? 1 : 0);
+
+        XML_Parser parser = XML_ParserCreate_MM(NULL, &memfuncs, NULL);
+        assert_true(parser != NULL);
+
+        CharData storage;
+        CharData_Init(&storage);
+        XML_SetUserData(parser, &storage);
+        XML_SetStartElementHandler(parser, start_element_event_handler);
+
+        g_biggestAlloc = 0;
+        g_totalAlloc = 0;
+        int offset = 0;
+        // fill data until the big token is covered (but not necessarily parsed)
+        while (offset < *leading + *bigtoken) {
+          assert_true(offset + *fillsize <= document_length);
+          const enum XML_Status status
+              = XML_Parse(parser, &document[offset], *fillsize, XML_FALSE);
+          if (status != XML_STATUS_OK) {
+            xml_failure(parser);
+          }
+          offset += *fillsize;
+        }
+        // Now, check that we've had a buffer allocation that could fit the
+        // context bytes and our big token. In order to detect a special case,
+        // we need to know how many bytes of our big token were included in the
+        // first push that contained _any_ bytes of the big token:
+        const int bigtok_first_chunk_bytes = *fillsize - (*leading % *fillsize);
+        if (bigtok_first_chunk_bytes >= *bigtoken && XML_CONTEXT_BYTES == 0) {
+          // Special case: we aren't saving any context, and the whole big token
+          // was covered by a single fill, so Expat may have parsed directly
+          // from our input pointer, without allocating an internal buffer.
+        } else if (*leading < XML_CONTEXT_BYTES) {
+          assert_true(g_biggestAlloc >= *leading + (size_t)*bigtoken);
+        } else {
+          assert_true(g_biggestAlloc >= XML_CONTEXT_BYTES + (size_t)*bigtoken);
+        }
+        // fill data until the big token is actually parsed
+        while (storage.count < expected_elem_total) {
+          const size_t alloc_before = g_totalAlloc;
+          assert_true(offset + *fillsize <= document_length);
+          const enum XML_Status status
+              = XML_Parse(parser, &document[offset], *fillsize, XML_FALSE);
+          if (status != XML_STATUS_OK) {
+            xml_failure(parser);
+          }
+          offset += *fillsize;
+          // since all the bytes of the big token are already in the buffer,
+          // the bufsize ceiling should make us finish its parsing without any
+          // further buffer allocations. We assume that there will be no other
+          // large allocations in this test.
+          assert_true(g_totalAlloc - alloc_before < 4096);
+        }
+        // test-the-test: was our alloc even called?
+        assert_true(g_totalAlloc > 0);
+        // test-the-test: there shouldn't be any extra start elements
+        assert_true(storage.count == expected_elem_total);
+
+        XML_ParserFree(parser);
+      }
+    }
+  }
+  free(document);
+}
+END_TEST
+
+START_TEST(test_varying_buffer_fills) {
+  const int KiB = 1024;
+  const int MiB = 1024 * KiB;
+  const int document_length = 16 * MiB;
+  const int big = 7654321; // arbitrarily chosen between 4 and 8 MiB
+
+  if (g_chunkSize != 0) {
+    return; // this test is slow, and doesn't use _XML_Parse_SINGLE_BYTES().
+  }
+
+  char *const document = (char *)malloc(document_length);
+  assert_true(document != NULL);
+  memset(document, 'x', document_length);
+  document[0] = '<';
+  document[1] = 't';
+  memset(&document[2], ' ', big - 2); // a very spacy token
+  document[big - 1] = '>';
+
+  // Each testcase is a list of buffer fill sizes, terminated by a value < 0.
+  // When reparse deferral is enabled, the final (negated) value is the expected
+  // maximum number of bytes scanned in parse attempts.
+  const int testcases[][30] = {
+      {8 * MiB, -8 * MiB},
+      {4 * MiB, 4 * MiB, -12 * MiB}, // try at 4MB, then 8MB = 12 MB total
+      // zero-size fills shouldn't trigger the bypass
+      {4 * MiB, 0, 4 * MiB, -12 * MiB},
+      {4 * MiB, 0, 0, 4 * MiB, -12 * MiB},
+      {4 * MiB, 0, 1 * MiB, 0, 3 * MiB, -12 * MiB},
+      // try to hit the buffer ceiling only once (at the end)
+      {4 * MiB, 2 * MiB, 1 * MiB, 512 * KiB, 256 * KiB, 256 * KiB, -12 * MiB},
+      // try to hit the same buffer ceiling multiple times
+      {4 * MiB + 1, 2 * MiB, 1 * MiB, 512 * KiB, -25 * MiB},
+
+      // try to hit every ceiling, by always landing 1K shy of the buffer size
+      {1 * KiB, 2 * KiB, 4 * KiB, 8 * KiB, 16 * KiB, 32 * KiB, 64 * KiB,
+       128 * KiB, 256 * KiB, 512 * KiB, 1 * MiB, 2 * MiB, 4 * MiB, -16 * MiB},
+
+      // try to avoid every ceiling, by always landing 1B past the buffer size
+      // the normal 2x heuristic threshold still forces parse attempts.
+      {2 * KiB + 1,          // will attempt 2KiB + 1 ==> total 2KiB + 1
+       2 * KiB, 4 * KiB,     // will attempt 8KiB + 1 ==> total 10KiB + 2
+       8 * KiB, 16 * KiB,    // will attempt 32KiB + 1 ==> total 42KiB + 3
+       32 * KiB, 64 * KiB,   // will attempt 128KiB + 1 ==> total 170KiB + 4
+       128 * KiB, 256 * KiB, // will attempt 512KiB + 1 ==> total 682KiB + 5
+       512 * KiB, 1 * MiB,   // will attempt 2MiB + 1 ==> total 2M + 682K + 6
+       2 * MiB, 4 * MiB,     // will attempt 8MiB + 1 ==> total 10M + 682K + 7
+       -(10 * MiB + 682 * KiB + 7)},
+      // try to avoid every ceiling again, except on our last fill.
+      {2 * KiB + 1,          // will attempt 2KiB + 1 ==> total 2KiB + 1
+       2 * KiB, 4 * KiB,     // will attempt 8KiB + 1 ==> total 10KiB + 2
+       8 * KiB, 16 * KiB,    // will attempt 32KiB + 1 ==> total 42KiB + 3
+       32 * KiB, 64 * KiB,   // will attempt 128KiB + 1 ==> total 170KiB + 4
+       128 * KiB, 256 * KiB, // will attempt 512KiB + 1 ==> total 682KiB + 5
+       512 * KiB, 1 * MiB,   // will attempt 2MiB + 1 ==> total 2M + 682K + 6
+       2 * MiB, 4 * MiB - 1, // will attempt 8MiB ==> total 10M + 682K + 6
+       -(10 * MiB + 682 * KiB + 6)},
+
+      // try to hit ceilings on the way multiple times
+      {512 * KiB + 1, 256 * KiB, 128 * KiB, 128 * KiB - 1, // 1 MiB buffer
+       512 * KiB + 1, 256 * KiB, 128 * KiB, 128 * KiB - 1, // 2 MiB buffer
+       1 * MiB + 1, 512 * KiB, 256 * KiB, 256 * KiB - 1,   // 4 MiB buffer
+       2 * MiB + 1, 1 * MiB, 512 * KiB,                    // 8 MiB buffer
+       // we'll make a parse attempt at every parse call
+       -(45 * MiB + 12)},
+  };
+  const int testcount = sizeof(testcases) / sizeof(testcases[0]);
+  for (int test_i = 0; test_i < testcount; test_i++) {
+    const int *fillsize = testcases[test_i];
+    set_subtest("#%d {%d %d %d %d ...}", test_i, fillsize[0], fillsize[1],
+                fillsize[2], fillsize[3]);
+    XML_Parser parser = XML_ParserCreate(NULL);
+    assert_true(parser != NULL);
+
+    CharData storage;
+    CharData_Init(&storage);
+    XML_SetUserData(parser, &storage);
+    XML_SetStartElementHandler(parser, start_element_event_handler);
+
+    g_bytesScanned = 0;
+    int worstcase_bytes = 0; // sum of (buffered bytes at each XML_Parse call)
+    int offset = 0;
+    while (*fillsize >= 0) {
+      assert_true(offset + *fillsize <= document_length); // or test is invalid
+      const enum XML_Status status
+          = XML_Parse(parser, &document[offset], *fillsize, XML_FALSE);
+      if (status != XML_STATUS_OK) {
+        xml_failure(parser);
+      }
+      offset += *fillsize;
+      fillsize++;
+      assert_true(offset <= INT_MAX - worstcase_bytes); // avoid overflow
+      worstcase_bytes += offset; // we might've tried to parse all pending bytes
+    }
+    assert_true(storage.count == 1); // the big token should've been parsed
+    assert_true(g_bytesScanned > 0); // test-the-test: does our counter work?
+    if (g_reparseDeferralEnabledDefault) {
+      // heuristic is enabled; some XML_Parse calls may have deferred reparsing
+      const unsigned max_bytes_scanned = -*fillsize;
+      if (g_bytesScanned > max_bytes_scanned) {
+        fprintf(stderr,
+                "bytes scanned in parse attempts: actual=%u limit=%u \n",
+                g_bytesScanned, max_bytes_scanned);
+        fail("too many bytes scanned in parse attempts");
+      }
+    }
+    assert_true(g_bytesScanned <= (unsigned)worstcase_bytes);
+
+    XML_ParserFree(parser);
+  }
+  free(document);
+}
+END_TEST
+
 void
 make_basic_test_case(Suite *s) {
   TCase *tc_basic = tcase_create("basic tests");
@@ -5170,7 +6068,7 @@ make_basic_test_case(Suite *s) {
   tcase_add_test(tc_basic, test_xmldecl_invalid);
   tcase_add_test(tc_basic, test_xmldecl_missing_attr);
   tcase_add_test(tc_basic, test_xmldecl_missing_value);
-  tcase_add_test(tc_basic, test_unknown_encoding_internal_entity);
+  tcase_add_test__if_xml_ge(tc_basic, test_unknown_encoding_internal_entity);
   tcase_add_test(tc_basic, test_unrecognised_encoding_internal_entity);
   tcase_add_test__ifdef_xml_dtd(tc_basic, test_ext_entity_set_encoding);
   tcase_add_test__ifdef_xml_dtd(tc_basic, test_ext_entity_no_handler);
@@ -5186,9 +6084,11 @@ make_basic_test_case(Suite *s) {
   tcase_add_test(tc_basic, test_wfc_undeclared_entity_with_external_subset);
   tcase_add_test(tc_basic, test_not_standalone_handler_reject);
   tcase_add_test(tc_basic, test_not_standalone_handler_accept);
-  tcase_add_test(tc_basic, test_wfc_no_recursive_entity_refs);
+  tcase_add_test(tc_basic, test_entity_start_tag_level_greater_than_one);
+  tcase_add_test__if_xml_ge(tc_basic, test_wfc_no_recursive_entity_refs);
+  tcase_add_test(tc_basic, test_no_indirectly_recursive_entity_refs);
   tcase_add_test__ifdef_xml_dtd(tc_basic, test_ext_entity_invalid_parse);
-  tcase_add_test(tc_basic, test_dtd_default_handling);
+  tcase_add_test__if_xml_ge(tc_basic, test_dtd_default_handling);
   tcase_add_test(tc_basic, test_dtd_attr_handling);
   tcase_add_test(tc_basic, test_empty_ns_without_namespaces);
   tcase_add_test(tc_basic, test_ns_in_attribute_default_without_namespaces);
@@ -5206,7 +6106,7 @@ make_basic_test_case(Suite *s) {
   tcase_add_test(tc_basic, test_stop_parser_between_cdata_calls);
   tcase_add_test(tc_basic, test_suspend_parser_between_cdata_calls);
   tcase_add_test(tc_basic, test_memory_allocation);
-  tcase_add_test(tc_basic, test_default_current);
+  tcase_add_test__if_xml_ge(tc_basic, test_default_current);
   tcase_add_test(tc_basic, test_dtd_elements);
   tcase_add_test(tc_basic, test_dtd_elements_nesting);
   tcase_add_test__ifdef_xml_dtd(tc_basic, test_set_foreign_dtd);
@@ -5218,30 +6118,34 @@ make_basic_test_case(Suite *s) {
   tcase_add_test__ifdef_xml_dtd(tc_basic, test_empty_foreign_dtd);
   tcase_add_test(tc_basic, test_set_base);
   tcase_add_test(tc_basic, test_attributes);
-  tcase_add_test(tc_basic, test_reset_in_entity);
+  tcase_add_test__if_xml_ge(tc_basic, test_reset_in_entity);
   tcase_add_test(tc_basic, test_resume_invalid_parse);
   tcase_add_test(tc_basic, test_resume_resuspended);
   tcase_add_test(tc_basic, test_cdata_default);
   tcase_add_test(tc_basic, test_subordinate_reset);
   tcase_add_test(tc_basic, test_subordinate_suspend);
-  tcase_add_test(tc_basic, test_subordinate_xdecl_suspend);
-  tcase_add_test(tc_basic, test_subordinate_xdecl_abort);
+  tcase_add_test__if_xml_ge(tc_basic, test_subordinate_xdecl_suspend);
+  tcase_add_test__if_xml_ge(tc_basic, test_subordinate_xdecl_abort);
   tcase_add_test__ifdef_xml_dtd(tc_basic,
                                 test_ext_entity_invalid_suspended_parse);
   tcase_add_test(tc_basic, test_explicit_encoding);
   tcase_add_test(tc_basic, test_trailing_cr);
-  tcase_add_test(tc_basic, test_ext_entity_trailing_cr);
+  tcase_add_test__if_xml_ge(tc_basic, test_ext_entity_trailing_cr);
   tcase_add_test(tc_basic, test_trailing_rsqb);
-  tcase_add_test(tc_basic, test_ext_entity_trailing_rsqb);
-  tcase_add_test(tc_basic, test_ext_entity_good_cdata);
+  tcase_add_test__if_xml_ge(tc_basic, test_ext_entity_trailing_rsqb);
+  tcase_add_test__if_xml_ge(tc_basic, test_ext_entity_good_cdata);
   tcase_add_test__ifdef_xml_dtd(tc_basic, test_user_parameters);
   tcase_add_test__ifdef_xml_dtd(tc_basic, test_ext_entity_ref_parameter);
   tcase_add_test(tc_basic, test_empty_parse);
+  tcase_add_test(tc_basic, test_negative_len_parse);
+  tcase_add_test(tc_basic, test_negative_len_parse_buffer);
   tcase_add_test(tc_basic, test_get_buffer_1);
   tcase_add_test(tc_basic, test_get_buffer_2);
-#if defined(XML_CONTEXT_BYTES)
+#if XML_CONTEXT_BYTES > 0
   tcase_add_test(tc_basic, test_get_buffer_3_overflow);
 #endif
+  tcase_add_test(tc_basic, test_buffer_can_grow_to_max);
+  tcase_add_test(tc_basic, test_getbuffer_allocates_on_zero_len);
   tcase_add_test(tc_basic, test_byte_info_at_end);
   tcase_add_test(tc_basic, test_byte_info_at_error);
   tcase_add_test(tc_basic, test_byte_info_at_cdata);
@@ -5267,6 +6171,8 @@ make_basic_test_case(Suite *s) {
   tcase_add_test__ifdef_xml_dtd(tc_basic, test_skipped_parameter_entity);
   tcase_add_test__ifdef_xml_dtd(tc_basic,
                                 test_recursive_external_parameter_entity);
+  tcase_add_test__ifdef_xml_dtd(tc_basic,
+                                test_recursive_external_parameter_entity_2);
   tcase_add_test(tc_basic, test_undefined_ext_entity_in_external_dtd);
   tcase_add_test(tc_basic, test_suspend_xdecl);
   tcase_add_test(tc_basic, test_abort_epilog);
@@ -5289,10 +6195,10 @@ make_basic_test_case(Suite *s) {
   tcase_add_test(tc_basic, test_skipped_null_loaded_ext_entity);
   tcase_add_test(tc_basic, test_skipped_unloaded_ext_entity);
   tcase_add_test__ifdef_xml_dtd(tc_basic, test_param_entity_with_trailing_cr);
-  tcase_add_test(tc_basic, test_invalid_character_entity);
-  tcase_add_test(tc_basic, test_invalid_character_entity_2);
-  tcase_add_test(tc_basic, test_invalid_character_entity_3);
-  tcase_add_test(tc_basic, test_invalid_character_entity_4);
+  tcase_add_test__if_xml_ge(tc_basic, test_invalid_character_entity);
+  tcase_add_test__if_xml_ge(tc_basic, test_invalid_character_entity_2);
+  tcase_add_test__if_xml_ge(tc_basic, test_invalid_character_entity_3);
+  tcase_add_test__if_xml_ge(tc_basic, test_invalid_character_entity_4);
   tcase_add_test(tc_basic, test_pi_handled_in_default);
   tcase_add_test(tc_basic, test_comment_handled_in_default);
   tcase_add_test(tc_basic, test_pi_yml);
@@ -5317,14 +6223,14 @@ make_basic_test_case(Suite *s) {
   tcase_add_test(tc_basic, test_unknown_encoding_invalid_surrogate);
   tcase_add_test(tc_basic, test_unknown_encoding_invalid_high);
   tcase_add_test(tc_basic, test_unknown_encoding_invalid_attr_value);
-  tcase_add_test(tc_basic, test_ext_entity_latin1_utf16le_bom);
-  tcase_add_test(tc_basic, test_ext_entity_latin1_utf16be_bom);
-  tcase_add_test(tc_basic, test_ext_entity_latin1_utf16le_bom2);
-  tcase_add_test(tc_basic, test_ext_entity_latin1_utf16be_bom2);
-  tcase_add_test(tc_basic, test_ext_entity_utf16_be);
-  tcase_add_test(tc_basic, test_ext_entity_utf16_le);
-  tcase_add_test(tc_basic, test_ext_entity_utf16_unknown);
-  tcase_add_test(tc_basic, test_ext_entity_utf8_non_bom);
+  tcase_add_test__if_xml_ge(tc_basic, test_ext_entity_latin1_utf16le_bom);
+  tcase_add_test__if_xml_ge(tc_basic, test_ext_entity_latin1_utf16be_bom);
+  tcase_add_test__if_xml_ge(tc_basic, test_ext_entity_latin1_utf16le_bom2);
+  tcase_add_test__if_xml_ge(tc_basic, test_ext_entity_latin1_utf16be_bom2);
+  tcase_add_test__if_xml_ge(tc_basic, test_ext_entity_utf16_be);
+  tcase_add_test__if_xml_ge(tc_basic, test_ext_entity_utf16_le);
+  tcase_add_test__if_xml_ge(tc_basic, test_ext_entity_utf16_unknown);
+  tcase_add_test__if_xml_ge(tc_basic, test_ext_entity_utf8_non_bom);
   tcase_add_test(tc_basic, test_utf8_in_cdata_section);
   tcase_add_test(tc_basic, test_utf8_in_cdata_section_2);
   tcase_add_test(tc_basic, test_utf8_in_start_tags);
@@ -5359,5 +6265,13 @@ make_basic_test_case(Suite *s) {
   tcase_add_test(tc_basic, test_empty_element_abort);
   tcase_add_test__ifdef_xml_dtd(tc_basic,
                                 test_pool_integrity_with_unfinished_attr);
-  tcase_add_test(tc_basic, test_nested_entity_suspend);
+  tcase_add_test__if_xml_ge(tc_basic, test_nested_entity_suspend);
+  tcase_add_test(tc_basic, test_big_tokens_scale_linearly);
+  tcase_add_test(tc_basic, test_set_reparse_deferral);
+  tcase_add_test(tc_basic, test_reparse_deferral_is_inherited);
+  tcase_add_test(tc_basic, test_set_reparse_deferral_on_null_parser);
+  tcase_add_test(tc_basic, test_set_reparse_deferral_on_the_fly);
+  tcase_add_test(tc_basic, test_set_bad_reparse_option);
+  tcase_add_test(tc_basic, test_bypass_heuristic_when_close_to_bufsize);
+  tcase_add_test(tc_basic, test_varying_buffer_fills);
 }

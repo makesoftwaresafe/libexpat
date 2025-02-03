@@ -11,11 +11,11 @@
                                  |_| XML parser
 
    Copyright (c) 2004-2006 Fred L. Drake, Jr. <fdrake@users.sourceforge.net>
-   Copyright (c) 2016-2020 Sebastian Pipping <sebastian@pipping.org>
+   Copyright (c) 2016-2023 Sebastian Pipping <sebastian@pipping.org>
    Copyright (c) 2017      Rhodri James <rhodri@wildebeest.org.uk>
    Copyright (c) 2018      Marco Maggi <marco.maggi-ipsu@poste.it>
    Copyright (c) 2019      David Loffredo <loffredo@steptools.com>
-   Copyright (c) 2023      Sony Corporation / Snild Dolkow <snild@sony.com>
+   Copyright (c) 2023-2024 Sony Corporation / Snild Dolkow <snild@sony.com>
    Licensed under the MIT license:
 
    Permission is  hereby granted,  free of charge,  to any  person obtaining
@@ -244,14 +244,11 @@ srunner_summarize(SRunner *runner, int verbosity) {
 }
 
 void
-_fail_unless(int condition, const char *file, int line, const char *msg) {
+_fail(const char *file, int line, const char *msg) {
   /* Always print the error message so it isn't lost.  In this case,
      we have a failure, so there's no reason to be quiet about what
      it is.
   */
-  if (condition) {
-    return;
-  }
   _check_current_filename = file;
   _check_current_lineno = line;
   if (msg != NULL) {

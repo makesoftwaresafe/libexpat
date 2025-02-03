@@ -10,7 +10,7 @@
    Copyright (c) 2003      Greg Stein <gstein@users.sourceforge.net>
    Copyright (c) 2005-2007 Steven Solie <steven@solie.ca>
    Copyright (c) 2005-2012 Karl Waclawek <karl@waclawek.net>
-   Copyright (c) 2016-2022 Sebastian Pipping <sebastian@pipping.org>
+   Copyright (c) 2016-2024 Sebastian Pipping <sebastian@pipping.org>
    Copyright (c) 2017-2022 Rhodri James <rhodri@wildebeest.org.uk>
    Copyright (c) 2017      Joe Orton <jorton@redhat.com>
    Copyright (c) 2017      José Gutiérrez de la Concha <jose@zeroc.com>
@@ -18,7 +18,7 @@
    Copyright (c) 2019      David Loffredo <loffredo@steptools.com>
    Copyright (c) 2020      Tim Gates <tim.gates@iress.com>
    Copyright (c) 2021      Donghee Na <donghee.na@python.org>
-   Copyright (c) 2023      Sony Corporation / Snild Dolkow <snild@sony.com>
+   Copyright (c) 2023-2024 Sony Corporation / Snild Dolkow <snild@sony.com>
    Licensed under the MIT license:
 
    Permission is  hereby granted,  free of charge,  to any  person obtaining
@@ -41,6 +41,7 @@
    USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
+#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -50,6 +51,7 @@
 #include "chardata.h"
 #include "minicheck.h"
 #include "common.h"
+#include "handlers.h"
 
 /* Common test data */
 
@@ -154,6 +156,16 @@ tcase_add_test__ifdef_xml_dtd(TCase *tc, tcase_test_function test) {
 }
 
 void
+tcase_add_test__if_xml_ge(TCase *tc, tcase_test_function test) {
+#if XML_GE == 1
+  tcase_add_test(tc, test);
+#else
+  UNUSED_P(tc);
+  UNUSED_P(test);
+#endif
+}
+
+void
 basic_teardown(void) {
   if (g_parser != NULL) {
     XML_ParserFree(g_parser);
@@ -174,25 +186,34 @@ _xml_failure(XML_Parser parser, const char *file, int line) {
            "u, offset %" XML_FMT_INT_MOD "u)\n    reported from %s, line %d\n",
            err, XML_ErrorString(err), XML_GetCurrentLineNumber(parser),
            XML_GetCurrentColumnNumber(parser), file, line);
-  _fail_unless(0, file, line, buffer);
+  _fail(file, line, buffer);
 }
 
 enum XML_Status
 _XML_Parse_SINGLE_BYTES(XML_Parser parser, const char *s, int len,
                         int isFinal) {
+  // This ensures that tests have to run pathological parse cases
+  // (e.g. when `s` is NULL) against plain XML_Parse rather than
+  // chunking _XML_Parse_SINGLE_BYTES.
+  assert((parser != NULL) && (s != NULL) && (len >= 0));
   const int chunksize = g_chunkSize;
-  int offset = 0;
   if (chunksize > 0) {
-    // parse in chunks of `chunksize` bytes as long as possible
-    for (; offset + chunksize < len; offset += chunksize) {
-      enum XML_Status res = XML_Parse(parser, s + offset, chunksize, XML_FALSE);
+    // parse in chunks of `chunksize` bytes as long as not exhausting
+    for (; len > chunksize; len -= chunksize, s += chunksize) {
+      enum XML_Status res = XML_Parse(parser, s, chunksize, XML_FALSE);
       if (res != XML_STATUS_OK) {
+        if ((res == XML_STATUS_SUSPENDED) && (len > chunksize)) {
+          fail("Use of function _XML_Parse_SINGLE_BYTES with a chunk size "
+               "greater than 0 (from g_chunkSize) does not work well with "
+               "suspension. Please consider use of plain XML_Parse at this "
+               "place in your test, instead.");
+        }
         return res;
       }
     }
   }
   // parse the final chunk, the size of which will be <= chunksize
-  return XML_Parse(parser, s + offset, len - offset, isFinal);
+  return XML_Parse(parser, s, len, isFinal);
 }
 
 void
@@ -200,35 +221,11 @@ _expect_failure(const char *text, enum XML_Error errorCode,
                 const char *errorMessage, const char *file, int lineno) {
   if (_XML_Parse_SINGLE_BYTES(g_parser, text, (int)strlen(text), XML_TRUE)
       == XML_STATUS_OK)
-    /* Hackish use of _fail_unless() macro, but let's us report
+    /* Hackish use of _fail() macro, but lets us report
        the right filename and line number. */
-    _fail_unless(0, file, lineno, errorMessage);
+    _fail(file, lineno, errorMessage);
   if (XML_GetErrorCode(g_parser) != errorCode)
     _xml_failure(g_parser, file, lineno);
-}
-
-/* Character data support for handlers, built on top of the code in
- * chardata.c
- */
-void XMLCALL
-accumulate_characters(void *userData, const XML_Char *s, int len) {
-  CharData_AppendXMLChars((CharData *)userData, s, len);
-}
-
-void XMLCALL
-accumulate_attribute(void *userData, const XML_Char *name,
-                     const XML_Char **atts) {
-  CharData *storage = (CharData *)userData;
-  UNUSED_P(name);
-  /* Check there are attributes to deal with */
-  if (atts == NULL)
-    return;
-
-  while (storage->count < 0 && atts[0] != NULL) {
-    /* "accumulate" the value of the first attribute we see */
-    CharData_AppendXMLChars(storage, atts[1], -1);
-    atts += 2;
-  }
 }
 
 void
@@ -257,12 +254,6 @@ _run_attribute_check(const char *text, const XML_Char *expected,
       == XML_STATUS_ERROR)
     _xml_failure(g_parser, file, line);
   CharData_CheckXMLChars(&storage, expected);
-}
-
-void XMLCALL
-ext_accumulate_characters(void *userData, const XML_Char *s, int len) {
-  ExtTest *test_data = (ExtTest *)userData;
-  accumulate_characters(test_data->storage, s, len);
 }
 
 void

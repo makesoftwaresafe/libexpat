@@ -10,7 +10,7 @@
    Copyright (c) 2003      Greg Stein <gstein@users.sourceforge.net>
    Copyright (c) 2005-2007 Steven Solie <steven@solie.ca>
    Copyright (c) 2005-2012 Karl Waclawek <karl@waclawek.net>
-   Copyright (c) 2016-2022 Sebastian Pipping <sebastian@pipping.org>
+   Copyright (c) 2016-2023 Sebastian Pipping <sebastian@pipping.org>
    Copyright (c) 2017-2022 Rhodri James <rhodri@wildebeest.org.uk>
    Copyright (c) 2017      Joe Orton <jorton@redhat.com>
    Copyright (c) 2017      José Gutiérrez de la Concha <jose@zeroc.com>
@@ -252,7 +252,7 @@ START_TEST(test_ns_prefix_with_empty_uri_4) {
                      "]>\n"
                      "<prefix:doc/>";
   /* Packaged info expected by the end element handler;
-     the weird structuring lets us re-use the triplet_end_checker()
+     the weird structuring lets us reuse the triplet_end_checker()
      function also used for another test. */
   const XML_Char *elemstr[] = {XCS("http://example.org/ doc prefix")};
   XML_SetReturnNSTriplet(g_parser, XML_TRUE);
@@ -697,8 +697,8 @@ START_TEST(test_ns_separator_in_uri) {
     set_subtest("%s", cases[i].doc);
     XML_Parser parser = XML_ParserCreateNS(NULL, cases[i].namesep);
     XML_SetElementHandler(parser, dummy_start_element, dummy_end_element);
-    if (XML_Parse(parser, cases[i].doc, (int)strlen(cases[i].doc),
-                  /*isFinal*/ XML_TRUE)
+    if (_XML_Parse_SINGLE_BYTES(parser, cases[i].doc, (int)strlen(cases[i].doc),
+                                /*isFinal*/ XML_TRUE)
         != cases[i].expectedStatus) {
       failCount++;
     }
@@ -747,7 +747,7 @@ make_namespace_test_case(Suite *s) {
   tcase_add_test(tc_namespace, test_ns_bad_element_leafname);
   tcase_add_test(tc_namespace, test_ns_utf16_leafname);
   tcase_add_test(tc_namespace, test_ns_utf16_element_leafname);
-  tcase_add_test(tc_namespace, test_ns_utf16_doctype);
+  tcase_add_test__if_xml_ge(tc_namespace, test_ns_utf16_doctype);
   tcase_add_test(tc_namespace, test_ns_invalid_doctype);
   tcase_add_test(tc_namespace, test_ns_double_colon_doctype);
   tcase_add_test(tc_namespace, test_ns_separator_in_uri);

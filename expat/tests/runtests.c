@@ -10,7 +10,7 @@
    Copyright (c) 2003      Greg Stein <gstein@users.sourceforge.net>
    Copyright (c) 2005-2007 Steven Solie <steven@solie.ca>
    Copyright (c) 2005-2012 Karl Waclawek <karl@waclawek.net>
-   Copyright (c) 2016-2022 Sebastian Pipping <sebastian@pipping.org>
+   Copyright (c) 2016-2023 Sebastian Pipping <sebastian@pipping.org>
    Copyright (c) 2017-2022 Rhodri James <rhodri@wildebeest.org.uk>
    Copyright (c) 2017      Joe Orton <jorton@redhat.com>
    Copyright (c) 2017      José Gutiérrez de la Concha <jose@zeroc.com>
@@ -18,6 +18,7 @@
    Copyright (c) 2019      David Loffredo <loffredo@steptools.com>
    Copyright (c) 2020      Tim Gates <tim.gates@iress.com>
    Copyright (c) 2021      Donghee Na <donghee.na@python.org>
+   Copyright (c) 2022      Sean McBride <sean@rogue-research.com>
    Copyright (c) 2023      Sony Corporation / Snild Dolkow <snild@sony.com>
    Licensed under the MIT license:
 
@@ -41,7 +42,7 @@
    USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
-#include <expat_config.h>
+#include "expat_config.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -69,7 +70,7 @@ make_suite(void) {
   make_miscellaneous_test_case(s);
   make_alloc_test_case(s);
   make_nsalloc_test_case(s);
-#if defined(XML_DTD)
+#if XML_GE == 1
   make_accounting_test_case(s);
 #endif
 
@@ -98,10 +99,14 @@ main(int argc, char *argv[]) {
     printf("Expat version: %" XML_FMT_STR "\n", XML_ExpatVersion());
 
   for (g_chunkSize = 0; g_chunkSize <= 5; g_chunkSize++) {
-    char context[100];
-    snprintf(context, sizeof(context), "chunksize=%d", g_chunkSize);
-    context[sizeof(context) - 1] = '\0';
-    srunner_run_all(sr, context, verbosity);
+    for (int enabled = 0; enabled <= 1; ++enabled) {
+      char context[100];
+      g_reparseDeferralEnabledDefault = enabled;
+      snprintf(context, sizeof(context), "chunksize=%d deferral=%d",
+               g_chunkSize, enabled);
+      context[sizeof(context) - 1] = '\0';
+      srunner_run_all(sr, context, verbosity);
+    }
   }
   srunner_summarize(sr, verbosity);
   nf = srunner_ntests_failed(sr);
